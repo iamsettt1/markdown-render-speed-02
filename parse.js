@@ -1091,7 +1091,10 @@ function parseListMarker(s, ind) {
 // Task list item marker: [ ] or [x] at the start of an item's content.
 function taskMarker(text) {
   if (text.length >= 3 && text.charAt(0) === '[' && (text.charAt(1) === ' ' || text.charAt(1) === 'x' || text.charAt(1) === 'X') && text.charAt(2) === ']' && (text.length === 3 || text.charAt(3) === ' ' || text.charAt(3) === '\t')) {
-    return { checked: text.charAt(1) !== ' ', rest: text.slice(3).replace(/^[ \t]+/, '') };
+    const rest = text.slice(3).replace(/^[ \t]+/, '');
+    // A bare marker with no following text is not a task list item.
+    if (rest === '') return null;
+    return { checked: text.charAt(1) !== ' ', rest };
   }
   return null;
 }
@@ -1185,7 +1188,21 @@ function renderChildren(node, refs) {
 
 function renderItem(item, tight, refs) {
   let inner = '';
+  let first = true;
   for (const c of item.children) {
+    if (first && c.t === 'paragraph' && c.lines && c.lines.length > 0) {
+      const tm = taskMarker(c.lines.join('\n'));
+      if (tm) {
+        const box = tm.checked
+          ? '<input checked="" disabled="" type="checkbox"> '
+          : '<input disabled="" type="checkbox"> ';
+        if (tight) inner += box + parseInline(tm.rest, refs);
+        else inner += '<p>' + box + parseInline(tm.rest, refs) + '</p>\n';
+        first = false;
+        continue;
+      }
+    }
+    first = false;
     if (tight && c.t === 'paragraph') inner += parseInline(c.lines.join('\n'), refs);
     else inner += renderBlock(c, refs);
   }
@@ -1243,7 +1260,7 @@ function renderBlock(b, refs) {
         }
         out += '</tr>\n';
       }
-      out += '</tbody>\n</table>\n';
+      out += '</tbody></table>\n';
       return out;
     }
   }
