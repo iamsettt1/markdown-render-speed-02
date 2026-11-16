@@ -251,10 +251,22 @@ function scanExtendedAutolink(s, i) {
     let url = trimUrlEnd(m[0]);
     return [{ type: 'link', href: encodeUri(cleanUrl(url), true), title: null, children: [{ type: 'text', text: url }] }, i + url.length];
   }
+  // scheme:email[/path] for mailto: and xmpp: (lowercase schemes only);
+  // the whole thing is one link, with at most one path segment
+  m = /^(mailto|xmpp):([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)(\/[^\s<>\/]+)?/.exec(s.slice(i));
+  if (m) {
+    let url = trimUrlEnd(m[0]);
+    const after = s[i + url.length];
+    if (url.endsWith('-') || url.endsWith('_')) return null;
+    if (after === '-' || after === '_') return null;
+    return [{ type: 'link', href: encodeUri(cleanUrl(url), true), title: null, children: [{ type: 'text', text: url }] }, i + url.length];
+  }
   m = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(s.slice(i));
   if (m) {
     let addr = m[0];
-    // trailing - or single _ invalidates; handle by trimming
+    // a trailing - or _ right after the match invalidates the whole autolink
+    const after = s[i + addr.length];
+    if (after === '-' || after === '_') return null;
     if (addr.endsWith('-')) return null;
     if (addr.endsWith('_') && !addr.endsWith('__')) {
       // a _ closing a _..._ pair is ok; approximate: trim single trailing _
@@ -1312,6 +1324,8 @@ function parse(src) {
           while (j < lines.length) {
             const rc = contentOf(j);
             if (rc === null || /^[ \t]*$/.test(rc)) break;
+            // a row cannot start a new block (blockquote, heading, fence, list)
+            if (/^ {0,3}>/.test(rc) || /^ {0,3}#{1,6}(?:[ \t]+|$)/.test(rc) || /^ {0,3}(`{3,}|~{3,})/.test(rc) || listMarker(rc)) break;
             const cells = splitTableRow(rc).slice(0, cols);
             while (cells.length < cols) cells.push('');
             rows.push(cells);
