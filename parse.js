@@ -212,7 +212,9 @@ function expandLeadingTabsAt(s, startCol) {
 // ---------- block parser ----------
 class Parser {
   constructor(src) {
-    this.lines = src.replace(/\r\n?/g, '\n').split('\n');
+    const norm = src.replace(/\r\n?/g, '\n');
+    this.endsWithNL = norm.endsWith('\n');
+    this.lines = norm.split('\n');
     // A trailing newline produces a final empty element that is not a line.
     if (this.lines.length > 1 && this.lines[this.lines.length - 1] === '') this.lines.pop();
     this.refs = new Map();
@@ -497,7 +499,7 @@ class Parser {
     }
     if (leaf) this.finalizeLeaf(leaf, stack);
     // A trailing blank line after an HTML block suppresses its newline.
-    if (this.pendingBlank) {
+    if (this.pendingBlank || !this.endsWithNL) {
       let node = root;
       while (node.children && node.children.length > 0) {
         const last = node.children[node.children.length - 1];
