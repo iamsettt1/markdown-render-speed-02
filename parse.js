@@ -741,6 +741,28 @@ function processEmphasis(nodes) {
       // wrap nodes between opener and closer
       const inner = nodes.slice(foundIdx + 1, i);
       const wrapped = { type: tag, children: inner };
+      // leftover-placement: when the closer run is longer than needed,
+      // the leftover delimiters render INSIDE the formed element iff some
+      // inner emphasis node in the span (a) uses the same delimiter char,
+      // (b) is of a DIFFERENT strength than the element being formed
+      // (inner em inside outer strong, or inner strong inside outer em),
+      // and (c) is immediately followed by a text node not starting with
+      // whitespace (marked: '**a*b*c***' gives
+      // '<strong>a<em>b</em>c*</strong>' but '**a*b* c***' gives
+      // '<strong>a<em>b</em> c</strong>*', '*a *b*c**' gives
+      // '<em>a <em>b</em>c</em>*', and '*a**b**c**' gives
+      // '<em>a<strong>b</strong>c*</em>')
+      let leftoverInside = false;
+      if (n.len > use) {
+        for (let q = 0; q + 1 < inner.length; q++) {
+          const w = inner[q];
+          const wUse = w.type === 'em' ? 1 : 2;
+          if ((w.type === 'em' || w.type === 'strong' || w.type === 'del') &&
+              w.char === op.char && wUse !== use &&
+              inner[q + 1].type === 'text' && inner[q + 1].text.length > 0 &&
+              !/^\s/.test(inner[q + 1].text)) { leftoverInside = true; break; }
+        }
+      }
       // record the forming pair for the outer-match block rule (lengths
       // as they were at match time, before the use is subtracted)
       wrapped.char = op.char;
@@ -749,6 +771,10 @@ function processEmphasis(nodes) {
       wrapped.innerClCanOpen = n.canOpen;
       // adjust lengths
       op.len -= use; n.len -= use;
+      if (leftoverInside && n.len > 0) {
+        inner.push({ type: 'text', text: n.char.repeat(n.len) });
+        n.len = 0;
+      }
       // remove nodes between, insert wrapped
       const insertAt = foundIdx + (op.len === 0 ? 0 : 1);
       nodes.splice(foundIdx + 1, i - foundIdx - 1, wrapped);
