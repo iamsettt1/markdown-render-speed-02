@@ -267,7 +267,9 @@ function scanExtendedAutolink(s, i, nodes) {
   };
   let m;
   if (s.startsWith('www.', i)) {
-    m = /^www\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+(?:[/?#][^\s<>\]]*)?/.exec(s.slice(i));
+    // the URL continues with any non-space chars after the domain
+    // (www.example.com\foo, www.example.com:8080, www.example.com_foo)
+    m = /^www\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+[^\s<>\]]*/.exec(s.slice(i));
     if (!m) return null;
     let url = trimUrlEnd(m[0]);
     if (url.length < 5) return null;
@@ -1512,8 +1514,10 @@ function isEmptyItem(afterMarker, nextContent, contentCol) {
   return col < contentCol;
 }
 function listCanInterrupt(lm, lines, idx, stack) {
-  // a list interrupts a paragraph if its first item is non-empty; ordered only if starts with 1
-  if (lm.ordered && lm.start !== 1) return false;
+  // a list interrupts a paragraph if its first item is non-empty; ordered
+  // only if it starts with 1 — except when the paragraph sits inside a
+  // list item, where marked lets any ordered start interrupt it
+  if (lm.ordered && lm.start !== 1 && !stack.some(n => n.type === 'item')) return false;
   // check item content on this line
   const line = lines[idx].text;
   const m = matchContainers(line, stack);
