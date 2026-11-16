@@ -784,7 +784,12 @@ function parseRefDef(lines) {
     const s = lines[li];
     while (pos < s.length) {
       const c = s.charCodeAt(pos);
-      if (c === 92 && pos + 1 < s.length) { label += s[pos + 1]; pos += 2; continue; }
+      if (c === 92 && pos + 1 < s.length) {
+        // Only \[ and \] resolve in a label; other escapes are preserved.
+        const nx = s.charCodeAt(pos + 1);
+        if (nx === 91 || nx === 93) { label += s[pos + 1]; pos += 2; continue; }
+        label += s[pos] + s[pos + 1]; pos += 2; continue;
+      }
       if (c === 91) return null; // nested [ not allowed
       if (c === 93) { closed = true; pos++; break; }
       label += s[pos]; pos++;
@@ -1450,6 +1455,8 @@ function encodeUrl(url) {
     else if (c === 62) out += '%3E';
     else if (c === 92) out += '%5C';
     else if (c === 96) out += '%60';
+    else if (c === 91) out += '%5B';
+    else if (c === 93) out += '%5D';
     else if (c === 123) out += '%7B';
     else if (c === 124) out += '%7C';
     else if (c === 125) out += '%7D';
@@ -1626,7 +1633,14 @@ function parseLinkLabel(text, j) {
   let k = j + 1, label = '', depth = 0;
   while (k < n) {
     const c = text.charCodeAt(k);
-    if (c === 92 && k + 1 < n) { label += text[k + 1]; k += 2; continue; }
+    // A backslash escape: only \[ and \] resolve here (they affect the
+    // label structure); other escapes are preserved verbatim so the label
+    // matches only a ref defined with the same escape.
+    if (c === 92 && k + 1 < n) {
+      const nx = text.charCodeAt(k + 1);
+      if (nx === 91 || nx === 93) { label += text[k + 1]; k += 2; continue; }
+      label += text[k] + text[k + 1]; k += 2; continue;
+    }
     // Balanced nested brackets are part of the label.
     if (c === 91) { depth++; label += text[k]; k++; continue; }
     if (c === 93) {
