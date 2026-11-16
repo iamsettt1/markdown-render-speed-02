@@ -424,15 +424,20 @@ class Parser {
         } else if (leaf.t === 'code' && leaf.fenced) {
           const close = fenceClose(line.s, leaf.fenceChar, leaf.fenceLen);
           if (close !== -1) { this.finalizeLeaf(leaf, stack); leaf = null; i++; continue; }
-          // Strip up to the fence's indent from content lines.
+          // Strip up to the fence's indent from content lines. The fence
+          // indent counts leading whitespace characters (a tab counts as
+          // one), not columns. A leading tab left in container-nested
+          // content is expanded to spaces from its column.
           let content = line.s;
+          let stripped = 0;
           if (leaf.fenceIndent > 0) {
-            const ind = indentColsOf(content, line.col);
-            if (ind.cols > 0) {
-              const l2 = { s: content, col: line.col };
-              stripCols(l2, Math.min(leaf.fenceIndent, ind.cols));
-              content = l2.s;
-            }
+            let n = leaf.fenceIndent, k = 0;
+            while (n > 0 && k < content.length && (content.charCodeAt(k) === 32 || content.charCodeAt(k) === 9)) { k++; n--; }
+            content = content.slice(k);
+            stripped = k;
+          }
+          if (line.col > 0 && content.charCodeAt(0) === 9) {
+            content = expandLeadingTabsAt(content, line.col + stripped);
           }
           leaf.lines.push(content);
           i++; continue;
@@ -454,8 +459,15 @@ class Parser {
           }
           i++; continue;
         } else if (leaf.t === 'table') {
-          leaf.rows.push(line.s);
-          i++; continue;
+          // A line that starts an interrupting block (blockquote, heading,
+          // fence, hr, list, html) ends the table instead of becoming a row.
+          if (allMatched && startsInterruptBlock(line.s)) {
+            this.finalizeLeaf(leaf, stack); leaf = null;
+            // fall through to Phase 4: new block start
+          } else {
+            leaf.rows.push(line.s);
+            i++; continue;
+          }
         }
       }
 
