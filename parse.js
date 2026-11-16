@@ -272,7 +272,12 @@ class Parser {
       if (!allMatched && !blank) {
         // If the current leaf is a paragraph and the line does not start a block
         // that can interrupt a paragraph, this line is a lazy continuation.
-        const isLazyPara = leaf && leaf.t === 'paragraph' && !startsInterruptBlock(line.s);
+        // A list marker line inside a list always ends the item's paragraph
+        // (it starts a new item or a new list), even if it is empty or an
+        // ordered list not starting with 1.
+        const inList = stack.some((b) => b.t === 'list');
+        const isListMarker = inList && parseListMarker(line.s, indentColsOf(line.s, line.col)) !== null;
+        const isLazyPara = leaf && leaf.t === 'paragraph' && !startsInterruptBlock(line.s) && !isListMarker;
         if (!isLazyPara) {
           // Close the leaf and any containers deeper than `matched`.
           if (leaf) {
@@ -328,6 +333,12 @@ class Parser {
         if (failedAt !== -1 && stack[failedAt] && stack[failedAt].t === 'blockquote') {
           while (stack.length > failedAt) stack.pop();
         }
+        // An empty list item (marker only, no content yet) is closed by a
+        // blank line; later indented lines are not part of it.
+        {
+          const top = stack[stack.length - 1];
+          if (top && top.t === 'item' && top.children.length === 0) stack.pop();
+        }
         i++;
         continue;
       }
@@ -378,8 +389,11 @@ class Parser {
             }
             // A line that starts a block which can interrupt a paragraph
             // (nested list, heading, fence, blockquote, hr, html) ends the
-            // paragraph instead of continuing it.
-            if (allMatched && startsInterruptBlock(line.s)) {
+            // paragraph instead of continuing it. Inside a list, any list
+            // marker ends the item's paragraph.
+            const inList3 = stack.some((b) => b.t === 'list');
+            const isListMarker3 = inList3 && parseListMarker(line.s, indentColsOf(line.s, line.col)) !== null;
+            if (allMatched && (startsInterruptBlock(line.s) || isListMarker3)) {
               this.finalizeLeaf(leaf, stack); leaf = null;
               // fall through: process this line as a new block start
             } else {
@@ -435,6 +449,13 @@ class Parser {
 
       // ---- Phase 4: new block start ----
       // (leaf is null here, or was just finalized)
+      // A whitespace-only line cannot start a block (a ">  " line only adds
+      // content to an already-open paragraph, handled in Phase 3).
+      if (isBlankStr(line.s)) {
+        this.pendingBlank = true;
+        i++;
+        continue;
+      }
       this.noteNewBlock(stack);
       const started = this.startBlock(line, stack, i);
       if (started && started.kind === 'paragraph') {
@@ -560,6 +581,14 @@ class Parser {
     if (parent && parent.children.length > 0) {
       const last = parent.children[parent.children.length - 1];
       if (last.t === 'html') last.noTrail = true;
+    }
+    // A blank line before a new block inside a list makes the list loose.
+    // The stack top is the list itself (a new item is starting) or an item
+    // (a block inside the item is starting).
+    const top = stack[stack.length - 1];
+    if (top.t === 'list') {
+      if (top.children.length > 0) top.loose = true;
+      return;
     }
     for (let k = stack.length - 1; k >= 1; k--) {
       const b = stack[k];
