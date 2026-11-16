@@ -1,9 +1,34 @@
 // parse.js — dependency-free CommonMark 0.31.2 + GFM parser, written from scratch.
 // parse(markdown) returns exactly the HTML marked 18.1.3 (default options) returns.
 // Single-pass, stateless per call, no caching, no network, no wall clock.
-const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escHtml(s) { let o = '', i = 0; for (; i < s.length; i++) { const c = s[i]; o += ESC[c] || c; } return o; }
-function escAttr(s) { return escHtml(s).replace(/"/g, '&quot;'); }
+function escAttr(s) { return escEntity(s, false); }
+function escText(s) { return escEntity(s, true); }
+// Entity-aware escape: a valid reference &name; or &#...; passes through verbatim
+// in attributes; in text, named refs pass through and numeric refs decode to the
+// character (then escaped if special). Anything else: '&' -> '&amp;'.
+function escEntity(s, decodeNumeric) {
+  let o = '', i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '&') {
+      const m = /^&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]*));/.exec(s.slice(i));
+      if (m) {
+        if (!decodeNumeric || m[3] !== undefined) { o += m[0]; i += m[0].length; continue; }
+        let cp = m[1] !== undefined ? parseInt(m[1], 10) : parseInt(m[2], 16);
+        if (cp === 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
+        const ch = String.fromCodePoint(cp);
+        o += ESC[ch] || ch;
+        i += m[0].length;
+        continue;
+      }
+      o += '&amp;'; i++; continue;
+    }
+    o += ESC[c] || c; i++;
+  }
+  return o;
+}
 const PUNCT = new Set('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~');
 function isPunct(ch) { return ch !== undefined && PUNCT.has(ch); }
 function isSpace(ch) { return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v' || ch === '\u00a0' || ch === '\u1680' || (ch >= '\u2000' && ch <= '\u200a') || ch === '\u202f' || ch === '\u205f' || ch === '\u3000' || ch === '\ufeff'; }
@@ -47,22 +72,19 @@ const ENT = {
   Agrave: 'À', aelig2: 'æ', sup2x: '²', frac12x: '½'
 };
 function decodeEntity(s, i) {
-  // s[i] === '&'; returns [decodedString, newIndex] or null
+  // s[i] === '&'; returns [decodedString, newIndex] or null.
+  // Only numeric references decode here (1-7 decimal digits, 1-6 hex digits);
+  // named references are left raw and preserved verbatim by escText/escAttr.
   if (s[i + 1] === '#') {
     let j = i + 2, hex = false;
     if (s[j] === 'x' || s[j] === 'X') { hex = true; j++; }
     const start = j;
     while (j < s.length && (hex ? /[0-9A-Fa-f]/.test(s[j]) : isDigit(s[j]))) j++;
     if (j === start || j >= s.length || s[j] !== ';') return null;
+    if (j - start > (hex ? 6 : 7)) return null;
     let cp = parseInt(s.slice(start, j), hex ? 16 : 10);
     if (cp === 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
     return [String.fromCodePoint(cp), j + 1];
-  }
-  let j = i + 1;
-  while (j < s.length && /[A-Za-z0-9]/.test(s[j]) && j - i <= 31) j++;
-  if (j < s.length && s[j] === ';') {
-    const name = s.slice(i + 1, j);
-    if (ENT[name] !== undefined) return [ENT[name], j + 1];
   }
   return null;
 }
@@ -275,8 +297,9 @@ function parseLinkTitle(s, i) {
   return [title, k + 1];
 }
 function scanLabel(s, i) {
-  // s[i] === '['; returns {end (index after matching ]), text, raw} or null
-  let depth = 0, j = i, raw = '';
+  // s[i] === '['; returns {end (index after matching ]), text, raw} or null.
+  // text excludes the outer brackets.
+  let depth = 1, j = i + 1, raw = '';
   while (j < s.length) {
     const c = s[j];
     if (c === '\\' && j + 1 < s.length) { raw += s.slice(j, j + 2); j += 2; continue; }
@@ -340,11 +363,6 @@ function parseInline(src, refs) {
     if (c === '`') {
       const r = scanCodeSpan(s, i);
       if (r) { pushNode(r[0]); i = r[1]; continue; }
-      text += c; i++; continue;
-    }
-    if (c === '&') {
-      const e = decodeEntity(s, i);
-      if (e) { text += e[0]; i = e[1]; continue; }
       text += c; i++; continue;
     }
     if (c === '<') {
@@ -589,6 +607,8 @@ function processEmphasis(nodes) {
       for (let p = openers.length - 1; p >= 0; p--) if (openers[p] < 0 || !nodes[openers[p]] || nodes[openers[p]].type !== 'delim') openers.splice(p, 1);
       continue;
     }
+    // opener-only delimiter: push so a later closer can find it
+    if (n.type === 'delim' && n.canOpen && n.len > 0) openers.push(i);
     i++;
   }
   // leftover delimiters become literal text
@@ -601,9 +621,9 @@ function renderInline(nodes) {
   let o = '';
   for (const n of nodes) {
     switch (n.type) {
-      case 'text': o += escHtml(n.text); break;
+      case 'text': o += escText(n.text); break;
       case 'code': o += '<code>' + escHtml(n.text) + '</code>'; break;
-      case 'br': o += '<br />\n'; break;
+      case 'br': o += '<br>'; break;
       case 'softbreak': o += '\n'; break;
       case 'html': o += n.text; break;
       case 'em': o += '<em>' + renderInline(n.children) + '</em>'; break;
@@ -989,6 +1009,8 @@ function parse(src) {
         if (lsChar(ls) === ' ' || lsChar(ls) === '\t') lsAdvance(ls);
         continue;
       }
+      // thematic break beats a list item on the same line (CommonMark)
+      if (isThematicBreak(c3)) break;
       const lm = listMarker(c3);
       if (lm) {
         const baseCol = ls.col;
@@ -1045,7 +1067,7 @@ function parse(src) {
       const infoRaw = content.slice(content.indexOf(fenceM[1]) + fenceLen);
       if (fenceChar === '`' && infoRaw.includes('`')) { /* not a fence */ }
       else {
-        const info = infoRaw.trim();
+        const info = infoRaw.replace(/\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1').trim();
         const fenceIndentChars = content.indexOf(fenceM[1]); // chars before fence
         const fenceCol = ls.col + fenceIndentChars;
         const codeLines = [];
@@ -1280,7 +1302,7 @@ function renderNode(node, refs, tight) {
       return '<pre><code' + cls + '>' + escHtml(node.content) + '</code></pre>\n';
     }
     case 'htmlblock': return node.text;
-    case 'hr': return '<hr />\n';
+    case 'hr': return '<hr>\n';
     case 'table': {
       let o = '<table>\n<thead>\n<tr>\n';
       for (let c = 0; c < node.header.length; c++) {
