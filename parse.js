@@ -789,69 +789,69 @@ function tryParseRefDef(lines, idx, refs) {
   // lines: array of raw content strings (already container-stripped); returns lines consumed or 0
   const first = lines[idx];
   if (first === undefined) return 0;
-  const m = /^ {0,3}\[/.exec(first);
-  if (!m) return 0;
-  const lab = scanLabel(first, first.indexOf('['));
+  if (!/^ {0,3}\[/.test(first)) return 0;
+  // join a window of following non-blank lines: a label or title may span
+  // lines, but a ref def can never span a blank line
+  let win = first;
+  for (let k = 1; k <= 4 && idx + k < lines.length; k++) {
+    if (/^[ \t]*$/.test(lines[idx + k])) break;
+    win += '\n' + lines[idx + k];
+  }
+  const lab = scanLabel(win, win.indexOf('['));
   if (!lab) return 0;
   const labelRaw = lab.text;
   // a label may not contain an unescaped '[' (an escaped \[ is fine)
   if (labelRaw.trim() === '' || /(?<!\\)\[/.test(labelRaw)) return 0;
-  let rest = first.slice(lab.end);
+  let rest = win.slice(lab.end);
   if (!/^:/.test(rest)) return 0;
   rest = rest.slice(1);
-  let cur = idx, line = rest;
-  let dest = null, title = null, consumed = 1;
-  function nextLine() { cur++; consumed++; return lines[cur] !== undefined ? lines[cur] : null; }
-  // destination: may be on next line
-  let j = 0;
-  while (j < line.length && (line[j] === ' ' || line[j] === '\t')) j++;
-  if (j >= line.length) {
-    const nl = nextLine();
-    if (nl === null) return 0;
-    line = nl; j = 0;
-    while (j < line.length && (line[j] === ' ' || line[j] === '\t')) j++;
-    if (j >= line.length) return 0;
+  // destination: skip spaces/tabs, at most one newline (dest may be next line)
+  let j = 0, nl = 0;
+  while (j < rest.length && (rest[j] === ' ' || rest[j] === '\t' || rest[j] === '\n')) {
+    if (rest[j] === '\n') { nl++; if (nl > 1) return 0; }
+    j++;
   }
-  if (line[j] === '<') {
-    const e = line.indexOf('>', j + 1);
-    if (e === -1) return 0;
-    let d = line.slice(j + 1, e);
-    if (d.includes('\n')) return 0;
-    dest = d.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, '$1');
-    line = line.slice(e + 1);
+  if (j >= rest.length) return 0;
+  let dest = null, pos;
+  if (rest[j] === '<') {
+    const e = rest.indexOf('>', j + 1);
+    if (e === -1 || rest.slice(j + 1, e).includes('\n')) return 0;
+    dest = rest.slice(j + 1, e).replace(/\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
+    pos = e + 1;
   } else {
-    const d = parseLinkDest(line, j);
+    const d = parseLinkDest(rest, j);
     if (!d) return 0;
-    dest = d[0]; line = line.slice(d[1]);
+    dest = d[0]; pos = d[1];
   }
-  // title: same line (needs preceding whitespace) or next line
-  let k = 0, hadWs = false;
-  while (k < line.length && (line[k] === ' ' || line[k] === '\t')) { k++; hadWs = true; }
-  if (k < line.length) {
-    if (!hadWs) return 0;
-    const t = parseLinkTitle(line, k);
+  // title: optional, same line (needs preceding whitespace) or next line; may span lines
+  let title = null, endPos = pos;
+  let k = pos;
+  while (k < rest.length && (rest[k] === ' ' || rest[k] === '\t')) k++;
+  if (k < rest.length && rest[k] !== '\n') {
+    if (k === pos) return 0; // title needs whitespace after the destination
+    const t = parseLinkTitle(rest, k);
     if (t[0] === null) return 0;
     let e = t[1];
-    while (e < line.length && (line[e] === ' ' || line[e] === '\t')) e++;
-    if (e < line.length) return 0;
-    title = t[0];
-  } else {
-    // try next line for title; if bad, fall back to no title
-    const saveCur = cur, saveConsumed = consumed;
-    const nl = nextLine();
-    if (nl !== null) {
-      let p = 0; while (p < nl.length && (nl[p] === ' ' || nl[p] === '\t')) p++;
-      const t = parseLinkTitle(nl, p);
+    while (e < rest.length && (rest[e] === ' ' || rest[e] === '\t')) e++;
+    if (e < rest.length && rest[e] !== '\n') return 0;
+    title = t[0]; endPos = e;
+  } else if (k < rest.length && rest[k] === '\n') {
+    let p = k + 1;
+    while (p < rest.length && (rest[p] === ' ' || rest[p] === '\t')) p++;
+    if (p < rest.length && rest[p] !== '\n') {
+      const t = parseLinkTitle(rest, p);
       if (t[0] !== null) {
         let e = t[1];
-        while (e < nl.length && (nl[e] === ' ' || nl[e] === '\t')) e++;
-        if (e >= nl.length) title = t[0];
-        else { cur = saveCur; consumed = saveConsumed; }
-      } else { cur = saveCur; consumed = saveConsumed; }
+        while (e < rest.length && (rest[e] === ' ' || rest[e] === '\t')) e++;
+        if (e >= rest.length || rest[e] === '\n') { title = t[0]; endPos = e; }
+      }
     }
   }
   const norm = normalizeLabel(labelText(labelRaw));
   if (norm === '') return 0;
+  // lines consumed: newlines in the window up to the end of the parsed part
+  const upto = lab.end + 1 + endPos;
+  const consumed = 1 + ((win.slice(0, upto).match(/\n/g) || []).length);
   if (!refs.has(norm)) refs.set(norm, { dest, title });
   return consumed;
 }
@@ -1277,6 +1277,8 @@ function parse(src) {
         const cand = [contentOf(i + consumedDefs)];
         cand.push(contentOf(i + consumedDefs + 1));
         cand.push(contentOf(i + consumedDefs + 2));
+        cand.push(contentOf(i + consumedDefs + 3));
+        cand.push(contentOf(i + consumedDefs + 4));
         if (cand[0] === null) break;
         const c = tryParseRefDef(cand, 0, refs);
         if (!c) break;
@@ -1464,3 +1466,4 @@ function renderNode(node, refs, tight) {
   return '';
 }
 export { parse };
+
