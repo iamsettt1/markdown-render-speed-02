@@ -598,8 +598,9 @@ function processEmphasis(nodes) {
         if (openers[p] > foundIdx && openers[p] < foundIdx + 1 + removed) openers[p] = -1;
         else if (openers[p] > foundIdx) openers[p] = openers[p] - removed;
       }
-      // remove the used opener entry
-      openers.splice(foundPos, 1);
+      // remove the opener entry only when it is fully consumed; a partially
+      // used opener stays on the stack for the remaining closer run
+      if (op.len === 0) openers.splice(foundPos, 1);
       if (op.len === 0) {
         // remove opener node
         nodes.splice(foundIdx, 1);
