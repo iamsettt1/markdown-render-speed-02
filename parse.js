@@ -389,7 +389,14 @@ function parseLinkTitle(s, i) {
 function scanLabel(s, i) {
   // s[i] === '['; returns {end (index after matching ]), text, raw} or null.
   // text excludes the outer brackets.
-  let depth = 1, j = i + 1, raw = '';
+  // Code spans are skipped by exact-length backtick-run matching (marked's
+  // label scanner), with two refinements: a span whose content holds a
+  // backtick and which is followed by more label text does NOT count as a
+  // span (its runs toggle "in code span" individually instead), and a run
+  // with no exact-length match toggles "in code span". A ']' only ends the
+  // label while not in a code span: '[a `b` c `d](u)' is not a link, but
+  // '[a ``b` c](u)' and '[less `` a ` b ``](u)' are.
+  let depth = 1, j = i + 1, raw = '', inCode = false;
   while (j < s.length) {
     const c = s[j];
     if (c === '\\' && j + 1 < s.length) { raw += s.slice(j, j + 2); j += 2; continue; }
@@ -404,19 +411,21 @@ function scanLabel(s, i) {
           k += m;
         } else k++;
       }
-      if (found === -1) { raw += s.slice(j, j + n); j += n; continue; }
-      const content = s.slice(j + n, found);
-      // multi-backtick span holding a backtick followed by more label text -> label scan fails
-      if (content.includes('`')) {
-        // find the matching ']' for this label to see if more text follows the span
-        let rest = s.slice(found + flen);
-        const closeIdx = rest.indexOf(']');
-        if (closeIdx > 0) return null;
+      if (found !== -1) {
+        const content = s.slice(j + n, found);
+        const rest = s.slice(found + flen);
+        if (content.includes('`') && rest.indexOf(']') > 0) {
+          // span holding a backtick with more label text after it: not a
+          // span; this run toggles in-code-span instead
+          raw += s.slice(j, j + n); j += n; inCode = !inCode; continue;
+        }
+        raw += s.slice(j, found + flen); j = found + flen; continue;
       }
-      raw += s.slice(j, found + flen); j = found + flen; continue;
+      raw += s.slice(j, j + n); j += n; inCode = !inCode; continue;
     }
-    if (c === '[') { depth++; raw += c; j++; continue; }
+    if (c === '[' && !inCode) { depth++; raw += c; j++; continue; }
     if (c === ']') {
+      if (inCode) { raw += c; j++; continue; }
       depth--;
       if (depth === 0) return { end: j + 1, text: raw, raw };
       raw += c; j++; continue;
@@ -424,6 +433,41 @@ function scanLabel(s, i) {
     raw += c; j++;
   }
   return null;
+}
+// Simulate the label scanner over s[from..to) and report the scanner state
+// at `to`: whether the ']' at `to` ends the label (not in a code span and
+// bracket depth back to 1). Same run/span rules as scanLabel.
+function labelScanState(s, from, to) {
+  let depth = 1, inCode = false, j = from;
+  while (j < to) {
+    const c = s[j];
+    if (c === '\\' && j + 1 < s.length) { j += 2; continue; }
+    if (c === '`') {
+      let n = 0; while (j + n < s.length && s[j + n] === '`') n++;
+      let k = j + n, found = -1, flen = 0;
+      while (k < s.length) {
+        if (s[k] === '`') {
+          let m = 0; while (k + m < s.length && s[k + m] === '`') m++;
+          if (m === n) { found = k; flen = m; break; }
+          k += m;
+        } else k++;
+      }
+      if (found !== -1) {
+        if (found < to && found + flen > to) return { inCode: true, depth };
+        const content = s.slice(j + n, found);
+        const rest = s.slice(found + flen);
+        if (content.includes('`') && rest.indexOf(']') > 0) {
+          inCode = !inCode; j += n; continue;
+        }
+        j = found + flen; continue;
+      }
+      inCode = !inCode; j += n; continue;
+    }
+    if (c === '[' && !inCode) depth++;
+    else if (c === ']' && !inCode) depth--;
+    j++;
+  }
+  return { inCode, depth };
 }
 function labelText(raw) {
   // labels are compared with backslashes intact (so foo\! != foo!, but
@@ -557,6 +601,13 @@ function parseInline(src, refs, lk) {
       // label raw text comes from the source span (backslashes intact), not
       // from the parsed nodes (which resolve escapes)
       const labelRaw = s.slice(br.srcIdx + (br.isImage ? 2 : 1), i);
+      // a ']' only ends the label while the label scanner is not inside a
+      // code span (see scanLabel): with an odd/unmatched backtick run the
+      // ']' is literal text and the bracket stays active for a later ']'
+      if (labelRaw.includes('`')) {
+        const st = labelScanState(s, br.srcIdx + (br.isImage ? 2 : 1), i);
+        if (st.inCode || st.depth !== 1) { text += c; i++; continue; }
+      }
       const label = labelText(labelRaw);
       const norm = normalizeLabel(label);
       let dest = null, title = null, endIdx = i + 1, ok = false, isRef = false, secondLabelSeen = false;
