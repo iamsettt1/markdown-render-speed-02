@@ -207,6 +207,8 @@ function expandLeadingTabsAt(s, startCol) {
 class Parser {
   constructor(src) {
     this.lines = src.replace(/\r\n?/g, '\n').split('\n');
+    // A trailing newline produces a final empty element that is not a line.
+    if (this.lines.length > 1 && this.lines[this.lines.length - 1] === '') this.lines.pop();
     this.refs = new Map();
     this.root = { t: 'document', children: [] };
     this.pendingBlank = false;
@@ -259,7 +261,10 @@ class Parser {
         } else { matched = k; } // list always matches
       }
       const allMatched = failedAt === -1;
-      const blank = isBlankStr(line.s);
+      // A line is blank if it is empty after container stripping, or if it
+      // is whitespace-only and the raw line was also whitespace-only
+      // (a ">  " line leaves a space of paragraph content, not a blank).
+      const blank = line.s === '' || (isBlankStr(line.s) && isBlankStr(raw));
       // A blank line matches every container (it ends paragraphs but keeps containers open).
       const container = allMatched ? stack[stack.length - 1] : stack[matched];
 
@@ -282,23 +287,47 @@ class Parser {
       if (blank) {
         if (leaf && leaf.t === 'paragraph') { this.finalizeLeaf(leaf, stack); leaf = null; }
         else if (leaf && leaf.t === 'html') {
-          if (leaf.htmlType === 6 || leaf.htmlType === 7) { this.finalizeLeaf(leaf, stack); leaf = null; }
-          else leaf.lines.push('');
+          if (leaf.htmlType === 6 || leaf.htmlType === 7) {
+            // An HTML block ending at a blank line has no trailing newline.
+            leaf.noTrail = true; this.finalizeLeaf(leaf, stack); leaf = null;
+          }
+          else if (matched === stack.length - 1) leaf.lines.push('');
+          else { leaf.noTrail = true; this.finalizeLeaf(leaf, stack); leaf = null; }
         } else if (leaf && leaf.t === 'code') {
-          // A whitespace-only line inside indented code keeps its indent
-          // minus 4 columns; inside fenced code it is an empty line.
-          if (!leaf.fenced) {
-            const ind = indentColsOf(line.s, line.col);
-            if (ind.cols >= 4) {
-              const l2 = { s: line.s, col: line.col };
-              stripCols(l2, 4);
-              leaf.lines.push(l2.s);
-            } else leaf.lines.push('');
-          } else leaf.lines.push('');
+          // A blank line inside the code block's container continues it;
+          // outside the container it ends the block.
+          if (matched === stack.length - 1) {
+            if (!leaf.fenced) {
+              // Indented code: a whitespace-only line keeps its indent minus 4.
+              const ind = indentColsOf(line.s, line.col);
+              if (ind.cols >= 4) {
+                const l2 = { s: line.s, col: line.col };
+                stripCols(l2, 4);
+                leaf.lines.push(l2.s);
+              } else leaf.lines.push('');
+            } else {
+              // Fenced code: preserve the line, minus the fence indent.
+              let content = line.s;
+              if (leaf.fenceIndent > 0) {
+                const ind = indentColsOf(content, line.col);
+                if (ind.cols > 0) {
+                  const l2 = { s: content, col: line.col };
+                  stripCols(l2, Math.min(leaf.fenceIndent, ind.cols));
+                  content = l2.s;
+                }
+              }
+              leaf.lines.push(content);
+            }
+          } else { this.finalizeLeaf(leaf, stack); leaf = null; }
         }
         // A blank line between blocks makes the enclosing list loose.
         this.pendingBlank = true;
         lastLineBlank = true;
+        // A truly blank line (no container marker) closes any blockquote it
+        // fails to match; a following ">" line starts a new blockquote.
+        if (failedAt !== -1 && stack[failedAt] && stack[failedAt].t === 'blockquote') {
+          while (stack.length > failedAt) stack.pop();
+        }
         i++;
         continue;
       }
@@ -369,7 +398,17 @@ class Parser {
         } else if (leaf.t === 'code' && leaf.fenced) {
           const close = fenceClose(line.s, leaf.fenceChar, leaf.fenceLen);
           if (close !== -1) { this.finalizeLeaf(leaf, stack); leaf = null; i++; continue; }
-          leaf.lines.push(line.s);
+          // Strip up to the fence's indent from content lines.
+          let content = line.s;
+          if (leaf.fenceIndent > 0) {
+            const ind = indentColsOf(content, line.col);
+            if (ind.cols > 0) {
+              const l2 = { s: content, col: line.col };
+              stripCols(l2, Math.min(leaf.fenceIndent, ind.cols));
+              content = l2.s;
+            }
+          }
+          leaf.lines.push(content);
           i++; continue;
         } else if (leaf.t === 'code' && !leaf.fenced) {
           const ind = indentColsOf(line.s, line.col);
@@ -410,6 +449,16 @@ class Parser {
       i++;
     }
     if (leaf) this.finalizeLeaf(leaf, stack);
+    // A trailing blank line after an HTML block suppresses its newline.
+    if (this.pendingBlank) {
+      let node = root;
+      while (node.children && node.children.length > 0) {
+        const last = node.children[node.children.length - 1];
+        if (last.t === 'html') { last.noTrail = true; break; }
+        if (last.children) { node = last; continue; }
+        break;
+      }
+    }
     // finalize containers (mark lists tight/loose)
     this.finalizeContainers(root);
   }
@@ -506,6 +555,12 @@ class Parser {
   noteNewBlock(stack) {
     if (!this.pendingBlank) return;
     this.pendingBlank = false;
+    // An HTML block followed by a blank line has no trailing newline.
+    const parent = stack[stack.length - 1];
+    if (parent && parent.children.length > 0) {
+      const last = parent.children[parent.children.length - 1];
+      if (last.t === 'html') last.noTrail = true;
+    }
     for (let k = stack.length - 1; k >= 1; k--) {
       const b = stack[k];
       if (b.t === 'item') {
@@ -578,7 +633,7 @@ class Parser {
         if (c0 === '`' && infoRaw.includes('`')) {
           // Not a fence; fall through to paragraph.
         } else {
-          const leaf = { t: 'code', fenced: true, fenceChar: c0, fenceLen: len, info, lines: [] };
+          const leaf = { t: 'code', fenced: true, fenceChar: c0, fenceLen: len, fenceIndent: indent, info, lines: [] };
           parent.children.push(leaf);
           return { leaf };
         }
@@ -667,52 +722,70 @@ class Parser {
 
 // ---------- link reference definitions ----------
 // Try to parse a link reference definition starting at lines[0] (and possibly
-// consuming lines[1], lines[2]). Returns { def, used } or null.
+// consuming more lines). Returns { def, used } or null.
 // A definition: [label]: <dest> or dest, optionally followed by a title on the
-// same line or the next line.
+// same line or the next line. The label and the title may span lines; the
+// destination is on a single line. Trailing junk after the destination/title
+// invalidates the definition.
 function parseRefDef(lines) {
-  const first = lines[0];
+  // Cursor over (line, pos).
+  let li = 0, pos = 0;
+  const lineAt = (i) => (i < lines.length ? lines[i] : null);
+  const chAt = (l, p) => {
+    const s = lineAt(l);
+    return s === null || p >= s.length ? -1 : s.charCodeAt(p);
+  };
+  // First line: up to 3 spaces of indent, then '['.
+  let s0 = lines[0];
   let i = 0;
-  const n = first.length;
-  // Up to 3 spaces of indent.
-  while (i < n && first.charCodeAt(i) === 32) i++;
-  if (i > 3 || i >= n || first.charCodeAt(i) !== 91) return null; // [
-  // Parse the label: [ ... ] with balanced brackets disallowed (no nested [),
-  // backslash escapes, up to 999 chars, non-empty after normalization.
-  let j = i + 1, label = '', closed = -1;
-  while (j < n) {
-    const c = first.charCodeAt(j);
-    if (c === 92 && j + 1 < n) { label += first[j + 1]; j += 2; continue; }
-    if (c === 91) return null; // nested [ not allowed
-    if (c === 93) { closed = j; break; }
-    label += first[j]; j++;
+  while (i < s0.length && s0.charCodeAt(i) === 32) i++;
+  if (i > 3 || i >= s0.length || s0.charCodeAt(i) !== 91) return null; // [
+  li = 0; pos = i + 1;
+  // Parse the label: [ ... ] (may span lines), no nested '[', backslash
+  // escapes, up to 999 chars, non-empty after normalization.
+  let label = '';
+  let closed = false;
+  while (li < lines.length) {
+    const s = lines[li];
+    while (pos < s.length) {
+      const c = s.charCodeAt(pos);
+      if (c === 92 && pos + 1 < s.length) { label += s[pos + 1]; pos += 2; continue; }
+      if (c === 91) return null; // nested [ not allowed
+      if (c === 93) { closed = true; pos++; break; }
+      label += s[pos]; pos++;
+    }
+    if (closed) break;
+    if (label.length > 999) return null;
+    // Continue on the next line (the newline becomes part of the label).
+    li++; pos = 0;
+    if (li < lines.length) label += '\n';
   }
-  if (closed === -1) return null;
+  if (!closed) return null;
+  if (label.length > 999) return null;
   if (normalizeLabel(label) === '') return null;
-  j = closed + 1;
-  if (j >= n || first.charCodeAt(j) !== 58) return null; // :
-  j++;
-  // Skip whitespace (possibly onto the next line).
-  let lineIdx = 0, pos = j;
+  // ':' must follow the ']' on the same line.
+  if (chAt(li, pos) !== 58) return null; // :
+  pos++;
+  // Skip whitespace (spaces, tabs, newlines) to the destination.
   const skipWs = () => {
-    while (true) {
-      const s = lines[lineIdx];
+    while (li < lines.length) {
+      const s = lines[li];
       while (pos < s.length && (s.charCodeAt(pos) === 32 || s.charCodeAt(pos) === 9)) pos++;
       if (pos < s.length) return true;
-      if (lineIdx + 1 >= lines.length) return false;
-      lineIdx++; pos = 0;
+      li++; pos = 0;
     }
+    return false;
   };
   if (!skipWs()) return null;
-  let s = lines[lineIdx];
-  // Destination: <...> or bare (no spaces, balanced parens).
+  // Destination: <...> or bare, on a single line.
   let dest = '';
+  let s = lines[li];
   if (s.charCodeAt(pos) === 60) { // <
     let k = pos + 1, ok = false;
     while (k < s.length) {
       const c = s.charCodeAt(k);
       if (c === 62) { ok = true; break; }
-      if (c === 10 || c === 60) return null;
+      if (c === 60) return null;
       if (c === 92 && k + 1 < s.length && isPunct(s.charCodeAt(k + 1))) { dest += s[k + 1]; k += 2; continue; }
       dest += s[k]; k++;
     }
@@ -722,7 +795,7 @@ function parseRefDef(lines) {
     let depth = 0, k = pos;
     while (k < s.length) {
       const c = s.charCodeAt(k);
-      if (c === 32 || c === 9 || c === 10) break;
+      if (c === 32 || c === 9) break;
       if (c === 92 && k + 1 < s.length && isPunct(s.charCodeAt(k + 1))) { dest += s[k + 1]; k += 2; continue; }
       if (c === 40) depth++;
       else if (c === 41) { if (depth === 0) break; depth--; }
@@ -732,74 +805,67 @@ function parseRefDef(lines) {
     pos = k;
   }
   dest = unescapeStr(dest);
-  // Optional title: same line (needs preceding whitespace) or next line.
-  let title = null;
-  let titleLine = lineIdx, titlePos = pos;
-  const tryTitle = (s2, p) => {
-    // p is at the first non-space char (or end). Title must be preceded by
-    // whitespace on this line; the caller ensures that.
-    if (p >= s2.length) return null;
-    const c = s2.charCodeAt(p);
-    if (c === 34 || c === 39) { // " or '
-      const q = c;
-      let k = p + 1, t = '';
-      while (k < s2.length) {
-        const cc = s2.charCodeAt(k);
-        if (cc === q) {
-          // Must be followed only by whitespace.
-          let m = k + 1;
-          while (m < s2.length && (s2.charCodeAt(m) === 32 || s2.charCodeAt(m) === 9)) m++;
-          if (m === s2.length) return { title: unescapeStr(t), end: k + 1 };
-          return null;
+  // Optional title. First try the same line (needs preceding whitespace).
+  let title = null, titleEndLi = li;
+  // Parse a title starting at (li, pos). The title may span lines (no blank
+  // line inside). Returns { title, endLi, endPos } or null.
+  const parseTitle = (startLi, startPos) => {
+    const s2 = lines[startLi];
+    if (startPos >= s2.length) return null;
+    const c = s2.charCodeAt(startPos);
+    let open = -1, close = -1;
+    if (c === 34 || c === 39) { open = c; close = c; }
+    else if (c === 40) { open = 40; close = 41; }
+    else return null;
+    let t = '', l = startLi, p = startPos + 1, depth = 0;
+    while (l < lines.length) {
+      const s3 = lines[l];
+      // A blank line inside a title invalidates it.
+      if (l > startLi && s3.trim() === '') return null;
+      while (p < s3.length) {
+        const cc = s3.charCodeAt(p);
+        if (open === 40 && cc === 40) depth++;
+        if (cc === close && (open !== 40 || depth === 0)) {
+          // Must be followed only by whitespace to end of line.
+          let m = p + 1;
+          while (m < s3.length && (s3.charCodeAt(m) === 32 || s3.charCodeAt(m) === 9)) m++;
+          if (m !== s3.length) return null;
+          return { title: unescapeStr(t), endLi: l, endPos: p + 1 };
         }
-        if (cc === 92 && k + 1 < s2.length && isPunct(s2.charCodeAt(k + 1))) { t += s2[k + 1]; k += 2; continue; }
-        t += s2[k]; k++;
+        if (open === 40 && cc === 41) depth--;
+        if (cc === 92 && p + 1 < s3.length && isPunct(s3.charCodeAt(p + 1))) { t += s3[p + 1]; p += 2; continue; }
+        t += s3[p]; p++;
       }
-      return null;
-    }
-    if (c === 40) { // ( ... )
-      let k = p + 1, t = '', depth = 0;
-      while (k < s2.length) {
-        const cc = s2.charCodeAt(k);
-        if (cc === 40) depth++;
-        else if (cc === 41) {
-          if (depth === 0) {
-            let m = k + 1;
-            while (m < s2.length && (s2.charCodeAt(m) === 32 || s2.charCodeAt(m) === 9)) m++;
-            if (m === s2.length) return { title: unescapeStr(t), end: k + 1 };
-            return null;
-          }
-          depth--;
-        }
-        if (cc === 92 && k + 1 < s2.length && isPunct(s2.charCodeAt(k + 1))) { t += s2[k + 1]; k += 2; continue; }
-        t += s2[k]; k++;
-      }
-      return null;
+      // End of line: the title continues on the next line.
+      l++; p = 0;
+      if (l < lines.length) t += '\n';
     }
     return null;
   };
   // Same-line title: only if there was whitespace after the destination.
   {
-    const s2 = lines[lineIdx];
-    let p = pos;
-    let hadWs = false;
+    const s2 = lines[li];
+    let p = pos, hadWs = false;
     while (p < s2.length && (s2.charCodeAt(p) === 32 || s2.charCodeAt(p) === 9)) { hadWs = true; p++; }
-    if (hadWs && p < s2.length) {
-      const r = tryTitle(s2, p);
-      if (r) { title = r.title; titleLine = lineIdx; titlePos = r.end; }
+    if (p < s2.length) {
+      // There is non-whitespace after the destination: it must be a title.
+      if (!hadWs) return null;
+      const r = parseTitle(li, p);
+      if (!r) return null;
+      title = r.title; titleEndLi = r.endLi;
+    } else if (li + 1 < lines.length) {
+      // Next-line title (optional): skip leading whitespace; if the line
+      // holds a valid title, use it.
+      const s2b = lines[li + 1];
+      let p2 = 0;
+      while (p2 < s2b.length && (s2b.charCodeAt(p2) === 32 || s2b.charCodeAt(p2) === 9)) p2++;
+      if (p2 < s2b.length) {
+        const r = parseTitle(li + 1, p2);
+        if (r) { title = r.title; titleEndLi = r.endLi; }
+      }
     }
   }
-  if (title === null && lineIdx + 1 < lines.length) {
-    // Next-line title (must be the next line, indented < 4, title only).
-    const s2 = lines[lineIdx + 1];
-    let p = 0;
-    while (p < s2.length && s2.charCodeAt(p) === 32) p++;
-    if (p <= 3 && p < s2.length) {
-      const r = tryTitle(s2, p);
-      if (r) { title = r.title; titleLine = lineIdx + 1; titlePos = r.end; }
-    }
-  }
-  return { def: { label: normalizeLabel(label), dest, title }, used: titleLine + 1 };
+  return { def: { label: normalizeLabel(label), dest, title }, used: titleEndLi + 1 };
 }
 
 // Extract leading link reference definitions from a paragraph's lines.
@@ -808,7 +874,7 @@ function extractDefs(lines, refs) {
   const defs = [];
   let idx = 0;
   while (idx < lines.length) {
-    const r = parseRefDef(lines.slice(idx, idx + 3));
+    const r = parseRefDef(lines.slice(idx));
     if (!r) break;
     defs.push(r.def);
     if (!refs.has(r.def.label)) refs.set(r.def.label, r.def);
@@ -898,7 +964,7 @@ function htmlBlockType(s, ind) {
   }
   // Type 7: line starts with <tag or </tag (tag name = letter, then alnum/-),
   // and the tag must be COMPLETE on this line (a closing '>' present,
-  // respecting quoted attribute values).
+  // respecting quoted attribute values), followed only by whitespace.
   let j = ind.chars;
   if (s.charAt(j) === '<') {
     let k = j + 1;
@@ -908,13 +974,23 @@ function htmlBlockType(s, ind) {
       while (k < s.length && /[A-Za-z0-9-]/.test(s.charAt(k))) k++;
       const nc = s.charAt(k);
       if (nc === '>' || nc === ' ' || nc === '\t' || nc === '/') {
-        let q = 0;
+        let q = 0, close = -1;
         while (k < s.length) {
           const ch = s.charCodeAt(k);
           if (q) { if (ch === q) q = 0; }
           else if (ch === 34 || ch === 39) q = ch;
-          else if (ch === 62) return 7;
+          else if (ch === 62) { close = k; break; }
           k++;
+        }
+        if (close !== -1) {
+          // Only whitespace may follow the closing '>'.
+          let m = close + 1, ok = true;
+          while (m < s.length) {
+            const ch = s.charCodeAt(m);
+            if (ch !== 32 && ch !== 9) { ok = false; break; }
+            m++;
+          }
+          if (ok) return 7;
         }
       }
     }
