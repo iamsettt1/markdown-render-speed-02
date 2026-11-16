@@ -926,7 +926,13 @@ function matchContainers(line, stack, lastBlank) {
       break;
     }
     if (c.type === 'item') {
-      if (isBlankLS(ls)) { depth++; cols.push(ls.col); continue; }
+      if (isBlankLS(ls)) {
+        // a blank line stays in the item, but the item's indent is still
+        // consumed from it (so a whitespace-only line inside a fenced
+        // code block loses the item indent like any other line)
+        lsSkipSpaces(ls, c.rel);
+        depth++; cols.push(ls.col); continue;
+      }
       if (lastBlank && c.children.length === 0) break;
       const save = { i: ls.i, col: ls.col, tab: ls.tab };
       const base = ls.col;
@@ -1227,7 +1233,29 @@ function parse(src) {
         let closed = false, j = i + 1;
         while (j < lines.length) {
           const lm2 = matchContainers(lines[j].text, stack);
-          if (!lm2.allMatched) break;
+          if (!lm2.allMatched) {
+            // A plain line that does not match the containers is still
+            // pulled into a fenced code block inside a LIST ITEM once the
+            // fence already has content (marked's list-item capture keeps
+            // the fence's lines). Block-start lines (heading, list item,
+            // fence, thematic break, html block, blockquote) end the
+            // fence instead, as does any line after a blank line. A
+            // blockquote never pulls lines in. Pulled lines are taken raw
+            // (no fence-indent strip); a setext underline keeps the
+            // 4-space indent a lazy setext line gets.
+            const firstUnmatched = stack[lm2.depth];
+            const lastLine = codeLines.length ? codeLines[codeLines.length - 1] : null;
+            const raw = lines[j].text;
+            if (firstUnmatched && firstUnmatched.type === 'item' && lastLine !== null && lastLine !== '' && !/^[ \t]*$/.test(raw)) {
+              const isBlockStart = /^ {0,3}#{1,6}(?:[ \t]+|$)/.test(raw) || /^ {0,3}(`{3,}|~{3,})/.test(raw) || isThematicBreak(raw) || /^ {0,3}>/.test(raw) || listMarker(raw) || htmlBlockType(makeLS(raw)) > 0;
+              if (!isBlockStart) {
+                codeLines.push(/^=+$/.test(raw.trim()) ? '    ' + raw.trim() : raw);
+                j++;
+                continue;
+              }
+            }
+            break;
+          }
           const l2 = lsRestExp(lm2.ls);
           const closeM = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(l2);
           if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) { closed = true; j++; break; }
