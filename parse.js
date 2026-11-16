@@ -1013,6 +1013,58 @@ const HTML_BLOCK_CLOSE = [
   /^$/,
   /^$/,
 ];
+// Validate the attributes of an HTML tag: s[start..end) is the text between
+// the tag name and '>'. A closing tag takes only whitespace. An opening tag
+// takes whitespace-separated attribute names (letter/_/:/. then letters,
+// digits, '-', '.', '_', ':') each optionally followed by '=' and a value
+// (double-quoted, single-quoted, or unquoted without space, quote, =, <, >,
+// backtick), optionally ending with '/'.
+function isValidTagAttrs(s, start, end, isClosing) {
+  let i = start;
+  const isWs = (c) => c === 32 || c === 9 || c === 10 || c === 13;
+  const isAttrStart = (c) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 58 || c === 46 || c > 127;
+  const isAttrChar = (c) => isAttrStart(c) || (c >= 48 && c <= 57) || c === 45;
+  while (i < end && isWs(s.charCodeAt(i))) i++;
+  if (isClosing) return i >= end;
+  while (i < end) {
+    const c = s.charCodeAt(i);
+    if (c === 47) { // '/'
+      i++;
+      while (i < end && isWs(s.charCodeAt(i))) i++;
+      return i >= end;
+    }
+    if (!isAttrStart(c)) return false;
+    i++;
+    while (i < end && isAttrChar(s.charCodeAt(i))) i++;
+    while (i < end && isWs(s.charCodeAt(i))) i++;
+    if (i < end && s.charCodeAt(i) === 61) { // '='
+      i++;
+      while (i < end && isWs(s.charCodeAt(i))) i++;
+      if (i >= end) return false;
+      const q = s.charCodeAt(i);
+      if (q === 34 || q === 39) {
+        i++;
+        while (i < end && s.charCodeAt(i) !== q) i++;
+        if (i >= end) return false;
+        i++;
+      } else {
+        if (q === 32 || q === 9 || q === 34 || q === 39 || q === 61 || q === 60 || q === 62 || q === 96) return false;
+        while (i < end) {
+          const d = s.charCodeAt(i);
+          if (d === 32 || d === 9 || d === 34 || d === 39 || d === 61 || d === 60 || d === 62 || d === 96) break;
+          i++;
+        }
+      }
+    }
+    if (i < end) {
+      const d = s.charCodeAt(i);
+      if (!isWs(d) && d !== 47) return false;
+    }
+    while (i < end && isWs(s.charCodeAt(i))) i++;
+  }
+  return true;
+}
+
 function htmlBlockType(s, ind) {
   if (ind.cols > 3) return 0;
   // Type 7: a complete open tag or closing tag on its own line (any tag name).
@@ -1048,6 +1100,10 @@ function htmlBlockType(s, ind) {
             if (ch !== 32 && ch !== 9) { ok = false; break; }
             m++;
           }
+          // The tag content (between the tag name and '>') must be valid
+          // attributes: a closing tag takes none; an opening tag takes
+          // whitespace-separated attribute names with optional values.
+          if (ok && !isValidTagAttrs(s, k, close, s.charAt(j + 1) === '/')) ok = false;
           if (ok) return 7;
         }
       }
@@ -1261,19 +1317,23 @@ function renderBlock(b, refs) {
         const attr = a ? ' align="' + a + '"' : '';
         out += '<th' + attr + '>' + parseInline(b.header[i], refs) + '</th>\n';
       }
-      out += '</tr>\n</thead>\n<tbody>';
-      for (const row of b.rows) {
-        const cells = splitTableRow(row);
-        out += '<tr>\n';
-        for (let i = 0; i < b.header.length; i++) {
-          const a = b.align[i];
-          const attr = a ? ' align="' + a + '"' : '';
-          const cell = i < cells.length ? cells[i] : '';
-          out += '<td' + attr + '>' + parseInline(cell, refs) + '</td>\n';
+      out += '</tr>\n</thead>\n';
+      if (b.rows.length > 0) {
+        out += '<tbody>';
+        for (const row of b.rows) {
+          const cells = splitTableRow(row);
+          out += '<tr>\n';
+          for (let i = 0; i < b.header.length; i++) {
+            const a = b.align[i];
+            const attr = a ? ' align="' + a + '"' : '';
+            const cell = i < cells.length ? cells[i] : '';
+            out += '<td' + attr + '>' + parseInline(cell, refs) + '</td>\n';
+          }
+          out += '</tr>\n';
         }
-        out += '</tr>\n';
+        out += '</tbody>';
       }
-      out += '</tbody></table>\n';
+      out += '</table>\n';
       return out;
     }
   }
@@ -1303,7 +1363,7 @@ function parseInline(text, refs) {
     if (c === 92) {
       if (i + 1 < n) {
         const d = text.charCodeAt(i + 1);
-        if (d === 10) { flush(); items.push({ k: 'br' }); i += 2; continue; }
+        if (d === 10) { flush(); items.push({ k: 'br' }); i += 2; while (i < n && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9)) i++; continue; }
         // Backslash-escaped punctuation: emit the char, HTML-escaped.
         if (isPunct(d)) { const esc = ESC[d]; buf += esc || text[i + 1]; i += 2; continue; }
       }
@@ -1360,6 +1420,7 @@ function parseInline(text, refs) {
         items.push({ k: 'soft' });
       }
       i++;
+      if (sp >= 2) while (i < n && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9)) i++;
       continue;
     }
     if (c === 60) {
@@ -1475,7 +1536,7 @@ function tryAutolink(text, i) {
 
 function tryHtmlTag(text, i) {
   const rest = text.slice(i);
-  let m = rest.match(/^<!--(?:[^-]|-(?!->))*-->/);
+  let m = rest.match(/^<!-->/ ) || rest.match(/^<!--->/) || rest.match(/^<!--(?:[^-]|-(?!->))*-->/);
   if (m) return m[0];
   m = rest.match(/^<\?[\s\S]*?\?>/);
   if (m) return m[0];
@@ -1483,7 +1544,9 @@ function tryHtmlTag(text, i) {
   if (m) return m[0];
   m = rest.match(/^<!\[CDATA\[[\s\S]*?\]\]>/);
   if (m) return m[0];
-  m = rest.match(/^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/);
+  m = rest.match(/^<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/);
+  if (m) return m[0];
+  m = rest.match(/^<\/[A-Za-z][A-Za-z0-9-]*\s*>/);
   if (m) return m[0];
   return null;
 }
