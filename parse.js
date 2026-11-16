@@ -1385,8 +1385,16 @@ function parseInline(text, refs) {
       i = j;
       continue;
     }
-    if ((c === 119 && text.startsWith('www.', i)) || (c === 104 && (text.startsWith('http://', i) || text.startsWith('https://', i)))) {
-      if (i === 0 || isWhite(text.charCodeAt(i - 1))) {
+    // Extended autolinks (GFM): www. and http(s):// URLs. The scheme is
+    // case-insensitive and triggers anywhere; www. must be lowercase and
+    // must not follow a word character.
+    const low8 = text.slice(i, i + 8).toLowerCase();
+    const isScheme = low8.startsWith('http://') || low8.startsWith('https://');
+    const isWww = text.startsWith('www.', i);
+    if (isScheme || isWww) {
+      const prev = i === 0 ? -1 : text.charCodeAt(i - 1);
+      const prevIsWord = (prev >= 48 && prev <= 57) || (prev >= 65 && prev <= 90) || (prev >= 97 && prev <= 122) || prev === 95;
+      if (isScheme || !prevIsWord) {
         const url = tryExtendedUrl(text, i);
         if (url) { flush(); items.push({ k: 'autolink', href: url.href, text: url.text }); i = url.end; continue; }
       }
