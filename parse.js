@@ -1465,6 +1465,51 @@ function encodeUrl(url) {
 // stack for the nearest active '[' opener, then parses an inline destination
 // / title or a reference label after the ']'. On success, converts the range
 // into a link item and returns { end, openersBottom }.
+// Parse an inline link destination/title at text[j] === '('. Returns
+// {dest, title, end} or null if the parenthesised part is not a valid
+// inline link.
+function parseInlineLink(text, j) {
+  const n = text.length;
+  let k = j + 1;
+  while (k < n && (text.charCodeAt(k) === 32 || text.charCodeAt(k) === 9 || text.charCodeAt(k) === 10)) k++;
+  let d = '';
+  if (k < n && text.charCodeAt(k) === 60) {
+    let m = k + 1, ok = false;
+    while (m < n) {
+      const cc = text.charCodeAt(m);
+      if (cc === 62) { ok = true; break; }
+      if (cc === 10 || cc === 60) return null;
+      if (cc === 92 && m + 1 < n && isPunct(text.charCodeAt(m + 1))) { d += text[m + 1]; m += 2; continue; }
+      d += text[m]; m++;
+    }
+    if (!ok) return null;
+    k = m + 1;
+  } else {
+    let depth = 0, m = k;
+    while (m < n) {
+      const cc = text.charCodeAt(m);
+      if (cc === 32 || cc === 9 || cc === 10) break;
+      if (cc === 92 && m + 1 < n && isPunct(text.charCodeAt(m + 1))) { d += text[m + 1]; m += 2; continue; }
+      if (cc === 40) depth++;
+      else if (cc === 41) { if (depth === 0) break; depth--; }
+      d += text[m]; m++;
+    }
+    k = m;
+  }
+  const dest = unescapeStr(d);
+  let title = null;
+  let m = k;
+  while (m < n && (text.charCodeAt(m) === 32 || text.charCodeAt(m) === 9 || text.charCodeAt(m) === 10)) m++;
+  if (m < n && text.charCodeAt(m) !== 41) {
+    const t = parseLinkTitle(text, m);
+    if (!t) return null;
+    title = t.title; m = t.end;
+    while (m < n && (text.charCodeAt(m) === 32 || text.charCodeAt(m) === 9 || text.charCodeAt(m) === 10)) m++;
+  }
+  if (m >= n || text.charCodeAt(m) !== 41) return null;
+  return { dest, title, end: m + 1 };
+}
+
 function tryResolveLink(text, i, items, delims, openersBottom, refs) {
   // Find the nearest active '[' delimiter above openersBottom.
   let openerIdx = -1;
@@ -1486,48 +1531,18 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
   const n = text.length;
   let j = i + 1;
   let dest = null, title = null, end = -1;
-  // Inline link: (dest "title")
-  if (j < n && text.charCodeAt(j) === 40) {
-    let k = j + 1;
-    while (k < n && (text.charCodeAt(k) === 32 || text.charCodeAt(k) === 9 || text.charCodeAt(k) === 10)) k++;
-    // Destination.
-    let d = '';
-    if (k < n && text.charCodeAt(k) === 60) {
-      let m = k + 1, ok = false;
-      while (m < n) {
-        const cc = text.charCodeAt(m);
-        if (cc === 62) { ok = true; break; }
-        if (cc === 10 || cc === 60) return fail();
-        if (cc === 92 && m + 1 < n && isPunct(text.charCodeAt(m + 1))) { d += text[m + 1]; m += 2; continue; }
-        d += text[m]; m++;
-      }
-      if (!ok) return fail();
-      k = m + 1;
-    } else {
-      let depth = 0, m = k;
-      while (m < n) {
-        const cc = text.charCodeAt(m);
-        if (cc === 32 || cc === 9 || cc === 10) break;
-        if (cc === 92 && m + 1 < n && isPunct(text.charCodeAt(m + 1))) { d += text[m + 1]; m += 2; continue; }
-        if (cc === 40) depth++;
-        else if (cc === 41) { if (depth === 0) break; depth--; }
-        d += text[m]; m++;
-      }
-      // An empty destination () is valid (href="").
-      k = m;
-    }
-    dest = unescapeStr(d);
-    // Optional title.
-    let m = k;
-    while (m < n && (text.charCodeAt(m) === 32 || text.charCodeAt(m) === 9 || text.charCodeAt(m) === 10)) m++;
-    if (m < n && text.charCodeAt(m) !== 41) {
-      const t = parseLinkTitle(text, m);
-      if (!t) return fail();
-      title = t.title; m = t.end;
-      while (m < n && (text.charCodeAt(m) === 32 || text.charCodeAt(m) === 9 || text.charCodeAt(m) === 10)) m++;
-    }
-    if (m >= n || text.charCodeAt(m) !== 41) return fail();
-    end = m + 1;
+  // Inline link: (dest "title"). If the parenthesised part is not a valid
+  // inline link, fall back to a shortcut reference link (cm-568).
+  const inline = (j < n && text.charCodeAt(j) === 40) ? parseInlineLink(text, j) : null;
+  if (inline) {
+    dest = inline.dest; title = inline.title; end = inline.end;
+  } else if (j < n && text.charCodeAt(j) === 40) {
+    // A '(' follows but is not a valid inline link: try shortcut ref.
+    const linkText = linkTextOf(items, openItem);
+    if (linkText === null) return fail();
+    const ref = refs.get(normalizeLabel(linkText));
+    if (!ref) return fail();
+    dest = ref.dest; title = ref.title; end = i + 1;
   } else {
     // Reference link: [label], [], or shortcut.
     let label = null, after = j;
@@ -1535,7 +1550,8 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
       // [text][label] or [text][].
       const lab = parseLinkLabel(text, j);
       if (!lab) return fail();
-      label = lab.label;
+      // A collapsed reference [text][] uses the link text as the label.
+      label = lab.label === '' ? null : lab.label;
       after = lab.end;
     } else {
       // Shortcut: the label is the link text itself.
@@ -1547,7 +1563,8 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
       if (linkText === null) return fail();
       ref = refs.get(normalizeLabel(linkText));
       if (!ref) return fail();
-      end = i + 1;
+      // Collapsed [text][] consumes the empty second label too.
+      end = after !== j ? after : i + 1;
     } else {
       ref = refs.get(normalizeLabel(label));
       if (!ref) return fail();
@@ -1574,11 +1591,11 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
   }
   const linkItem = { k: 'link', href: dest, title, img: opener.img, children };
   items.splice(openPos, items.length - openPos, linkItem);
-  // Deactivate this opener and all link openers before it (openersBottom).
-  for (let d = 0; d <= openerIdx; d++) {
-    if (delims[d].ch === '[') delims[d].active = false;
-  }
-  return { end, openersBottom: openerIdx };
+  // Deactivate this opener. A link (not an image) also raises openersBottom
+  // so no earlier '[' can form a link containing it (links cannot nest);
+  // an image leaves earlier '[' usable as an outer link's opener.
+  opener.active = false;
+  return { end, openersBottom: opener.img ? openersBottom : openerIdx };
 }
 tryResolveLink._nextLinkId = 0;
 
@@ -1842,6 +1859,29 @@ function processEmphasis(items, delims) {
   }
 }
 
+// Plain text of inline items (for image alt attributes): emphasis markers
+// that formed emphasis contribute nothing, literal delimiters contribute
+// their characters, code spans contribute their text, HTML is stripped.
+function plainText(items) {
+  let out = '';
+  for (const it of items) {
+    if (it.k === 'text' || it.k === 'code') {
+      out += it.s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    } else if (it.k === 'delim') {
+      if (it.len > 0) out += it.ch.repeat(it.len);
+    } else if (it.k === 'soft' || it.k === 'br') {
+      out += '\n';
+    } else if (it.k === 'autolink') {
+      out += it.text;
+    } else if (it.k === 'link') {
+      out += plainText(it.children);
+    } else if (it.k === 'linkopen') {
+      out += it.img ? '![' : '[';
+    }
+  }
+  return out;
+}
+
 // Render the flat item list, honouring emphasis matches and link markers.
 // Emphasis is rendered with a stack: an opener pushes its matches (outermost
 // first), a closer pops its match.
@@ -1894,9 +1934,9 @@ function renderInline(items, refs) {
     }
     if (it.k === 'link') {
       if (it.img) {
-        const alt = renderInline(it.children, refs);
+        const alt = plainText(it.children);
         const title = it.title ? ' title="' + escapeAttr(it.title) + '"' : '';
-        out += '<img src="' + escapeAttr(encodeUrl(it.href)) + '" alt="' + alt + '"' + title + ' />';
+        out += '<img src="' + escapeAttr(encodeUrl(it.href)) + '" alt="' + escapeAttr(alt) + '"' + title + '>';
       } else {
         const title = it.title ? ' title="' + escapeAttr(it.title) + '"' : '';
         out += '<a href="' + escapeAttr(encodeUrl(it.href)) + '"' + title + '>' + renderInline(it.children, refs) + '</a>';
