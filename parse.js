@@ -1249,7 +1249,9 @@ function parseInline(text, refs) {
   let i = 0;
   let buf = '';
   const flush = () => { if (buf) { items.push({ k: 'text', s: buf }); buf = ''; } };
-  const isWhite = (c) => c === 32 || c === 9 || c === 10 || c === 13 || c === 11 || c === 12;
+  // Unicode whitespace (CommonMark): ASCII whitespace plus the Zs category
+  // (NBSP, U+1680, U+2000–U+200A, U+2028/2029, U+202F, U+205F, U+3000).
+  const isWhite = (c) => c === 32 || c === 9 || c === 10 || c === 13 || c === 11 || c === 12 || c === 0xA0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200A) || c === 0x2028 || c === 0x2029 || c === 0x202F || c === 0x205F || c === 0x3000;
 
   while (i < n) {
     const c = text.charCodeAt(i);
@@ -1474,6 +1476,9 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
   if (openerIdx === -1) return null;
   const opener = delims[openerIdx];
   const openItem = opener.item;
+  // A failed link attempt deactivates this opener: it may not form a link
+  // with a later ']' (cm-513).
+  const fail = () => { opener.active = false; return null; };
   // The link text is the items between openItem and the current ']' (which is
   // not yet an item). It must be non-empty and must not contain an unescaped
   // '[' that would make it a nested link... (handled by openersBottom).
@@ -1492,11 +1497,11 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
       while (m < n) {
         const cc = text.charCodeAt(m);
         if (cc === 62) { ok = true; break; }
-        if (cc === 10 || cc === 60) return null;
+        if (cc === 10 || cc === 60) return fail();
         if (cc === 92 && m + 1 < n && isPunct(text.charCodeAt(m + 1))) { d += text[m + 1]; m += 2; continue; }
         d += text[m]; m++;
       }
-      if (!ok) return null;
+      if (!ok) return fail();
       k = m + 1;
     } else {
       let depth = 0, m = k;
@@ -1508,7 +1513,7 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
         else if (cc === 41) { if (depth === 0) break; depth--; }
         d += text[m]; m++;
       }
-      if (d === '') return null;
+      // An empty destination () is valid (href="").
       k = m;
     }
     dest = unescapeStr(d);
@@ -1517,11 +1522,11 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
     while (m < n && (text.charCodeAt(m) === 32 || text.charCodeAt(m) === 9 || text.charCodeAt(m) === 10)) m++;
     if (m < n && text.charCodeAt(m) !== 41) {
       const t = parseLinkTitle(text, m);
-      if (!t) return null;
+      if (!t) return fail();
       title = t.title; m = t.end;
       while (m < n && (text.charCodeAt(m) === 32 || text.charCodeAt(m) === 9 || text.charCodeAt(m) === 10)) m++;
     }
-    if (m >= n || text.charCodeAt(m) !== 41) return null;
+    if (m >= n || text.charCodeAt(m) !== 41) return fail();
     end = m + 1;
   } else {
     // Reference link: [label], [], or shortcut.
@@ -1529,7 +1534,7 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
     if (j < n && text.charCodeAt(j) === 91) {
       // [text][label] or [text][].
       const lab = parseLinkLabel(text, j);
-      if (!lab) return null;
+      if (!lab) return fail();
       label = lab.label;
       after = lab.end;
     } else {
@@ -1539,16 +1544,16 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
     let ref;
     if (label === null) {
       const linkText = linkTextOf(items, openItem);
-      if (linkText === null) return null;
+      if (linkText === null) return fail();
       ref = refs.get(normalizeLabel(linkText));
-      if (!ref) return null;
+      if (!ref) return fail();
       end = i + 1;
     } else {
       ref = refs.get(normalizeLabel(label));
-      if (!ref) return null;
+      if (!ref) return fail();
       end = after;
     }
-    if (!ref) return null;
+    if (!ref) return fail();
     dest = ref.dest; title = ref.title;
   }
   // Build the link item: replace the opener item and everything after it up
@@ -1593,12 +1598,16 @@ function linkTextOf(items, openItem) {
 // inside a label uses the exact-length closing rule.
 function parseLinkLabel(text, j) {
   const n = text.length;
-  let k = j + 1, label = '';
+  let k = j + 1, label = '', depth = 0;
   while (k < n) {
     const c = text.charCodeAt(k);
     if (c === 92 && k + 1 < n) { label += text[k + 1]; k += 2; continue; }
-    if (c === 91) return null; // nested [ rejected
-    if (c === 93) return { label, end: k + 1 };
+    // Balanced nested brackets are part of the label.
+    if (c === 91) { depth++; label += text[k]; k++; continue; }
+    if (c === 93) {
+      if (depth > 0) { depth--; label += text[k]; k++; continue; }
+      return { label, end: k + 1 };
+    }
     if (c === 96) {
       // Code span: exact-length closing run.
       let m = k, run = 0;
@@ -1764,6 +1773,13 @@ function processEmphasis(items, delims) {
       for (let o = d - 1; o >= 0; o--) {
         const opener = delims[o];
         if (!opener.active || opener.ch !== closer.ch || !opener.canOpen) continue;
+        // Overlap rule: an opener inside an already-matched pair cannot
+        // match a closer outside that pair (emphasis may nest, not cross).
+        let overlaps = false;
+        for (const p of matchedPairs) {
+          if (p.openIdx < o && o < p.closeIdx && d > p.closeIdx) { overlaps = true; break; }
+        }
+        if (overlaps) continue;
         // Nested-emphasis blocking (see above): sum the outer opener's
         // length and the lengths of the closers of all matched pairs fully
         // between it and this closer (can-both closers only); if the total
