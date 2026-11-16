@@ -1082,6 +1082,7 @@ function htmlBlockType(s, ind) {
     if (k < s.length && /[A-Za-z]/.test(s.charAt(k))) {
       k++;
       while (k < s.length && /[A-Za-z0-9-]/.test(s.charAt(k))) k++;
+      const nameEnd = k;
       const nc = s.charAt(k);
       if (nc === '>' || nc === ' ' || nc === '\t' || nc === '/') {
         let q = 0, close = -1;
@@ -1103,7 +1104,7 @@ function htmlBlockType(s, ind) {
           // The tag content (between the tag name and '>') must be valid
           // attributes: a closing tag takes none; an opening tag takes
           // whitespace-separated attribute names with optional values.
-          if (ok && !isValidTagAttrs(s, k, close, s.charAt(j + 1) === '/')) ok = false;
+          if (ok && !isValidTagAttrs(s, nameEnd, close, s.charAt(j + 1) === '/')) ok = false;
           if (ok) return 7;
         }
       }
@@ -1469,6 +1470,9 @@ function parseInline(text, refs) {
         canOpen = leftFlank;
         canClose = rightFlank;
       }
+      // A '~' run of length 3 or more never forms strikethrough (the whole
+      // run stays literal); only runs of 1 or 2 do.
+      if (ch === '~' && run >= 3) { buf += ch.repeat(run); i = j; continue; }
       flush();
       const item = { k: 'delim', ch, len: run, canOpen, canClose };
       items.push(item);
