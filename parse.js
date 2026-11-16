@@ -17,6 +17,12 @@ function isPunct(c) {
   // ASCII punctuation only (CommonMark backslash escapes are ASCII-only).
   return (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
 }
+// Unicode punctuation for emphasis flanking: ASCII punctuation plus any
+// character in the Unicode P (punctuation) or S (symbol) categories.
+function isFlankPunct(c) {
+  if (c < 128) return isPunct(c);
+  return /[\p{P}\p{S}]/u.test(String.fromCharCode(c));
+}
 function isDigit(c) { return c >= 48 && c <= 57; }
 function isHex(c) { return (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102); }
 function isWordChar(c) { return isAlnum(c) || c === 95; } // alnum or _
@@ -458,6 +464,8 @@ class Parser {
       }
       this.noteNewBlock(stack);
       const started = this.startBlock(line, stack, i);
+      // The blank line (if any) is consumed by this new block.
+      this.pendingBlank = false;
       if (started && started.kind === 'paragraph') {
         leaf = { t: 'paragraph', lines: [this.paragraphLineContent(raw, line, stack, matched, failedAt, strippedCols, started.extra)], _prevLazy: failedAt !== -1 };
         stack[stack.length - 1].children.push(leaf);
@@ -559,6 +567,10 @@ class Parser {
     } else if (leaf.t === 'code' && !leaf.fenced) {
       // Trailing blank lines are stripped from indented code blocks.
       while (leaf.lines.length > 0 && leaf.lines[leaf.lines.length - 1] === '') leaf.lines.pop();
+    } else if (leaf.t === 'code' && leaf.fenced) {
+      // One trailing blank line is stripped from a fenced code block (the
+      // newline before the closing fence); further blank lines are content.
+      if (leaf.lines.length > 0 && leaf.lines[leaf.lines.length - 1] === '') leaf.lines.pop();
     }
   }
 
@@ -575,21 +587,15 @@ class Parser {
   // the pending-blank flag. Called when a new block starts.
   noteNewBlock(stack) {
     if (!this.pendingBlank) return;
-    this.pendingBlank = false;
     // An HTML block followed by a blank line has no trailing newline.
     const parent = stack[stack.length - 1];
     if (parent && parent.children.length > 0) {
       const last = parent.children[parent.children.length - 1];
       if (last.t === 'html') last.noTrail = true;
     }
-    // A blank line before a new block inside a list makes the list loose.
-    // The stack top is the list itself (a new item is starting) or an item
-    // (a block inside the item is starting).
-    const top = stack[stack.length - 1];
-    if (top.t === 'list') {
-      if (top.children.length > 0) top.loose = true;
-      return;
-    }
+    // A blank line before a new block inside an item makes the list loose.
+    // (A new list item marks looseness itself in startListItem, using the
+    // still-set pendingBlank flag; do not clear it here.)
     for (let k = stack.length - 1; k >= 1; k--) {
       const b = stack[k];
       if (b.t === 'item') {
@@ -1348,8 +1354,8 @@ function parseInline(text, refs) {
       const after = j < n ? text.charCodeAt(j) : -1;
       const beforeWs = before === -1 || isWhite(before);
       const afterWs = after === -1 || isWhite(after);
-      const beforePunct = before !== -1 && isPunct(before);
-      const afterPunct = after !== -1 && isPunct(after);
+      const beforePunct = before !== -1 && isFlankPunct(before);
+      const afterPunct = after !== -1 && isFlankPunct(after);
       const leftFlank = !afterWs && (!afterPunct || beforeWs || beforePunct);
       const rightFlank = !beforeWs && (!beforePunct || afterWs || afterPunct);
       let canOpen, canClose;
@@ -1742,38 +1748,69 @@ function tryEmail(text, i) {
 function processEmphasis(items, delims) {
   // For each delimiter that can close, look back for the nearest matching
   // opener; apply the odd-match rule; record matches. A delimiter may match
-  // more than once (e.g. ***), so each item keeps a list of its matches.
+  // more than once (e.g. ***), so each item keeps a list of its matches, and
+  // a closer with length left is re-processed until exhausted or unmatched.
+  // Nested-emphasis blocking: an outer opener is blocked when a matched
+  // inner pair sits between it and the closer, the inner opener can only
+  // open, the inner closer can both open and close, and the inner closer's
+  // length plus the outer opener's length is a multiple of 3.
+  const matchedPairs = [];
   for (let d = 0; d < delims.length; d++) {
     const closer = delims[d];
     if (!closer.active || !closer.canClose) continue;
     if (closer.ch === '[') continue;
-    for (let o = d - 1; o >= 0; o--) {
-      const opener = delims[o];
-      if (!opener.active || opener.ch !== closer.ch || !opener.canOpen) continue;
-      // Odd-match rule (spec): if either delimiter can both open and close,
-      // the sum of the run lengths must not be a multiple of 3 unless both
-      // lengths are multiples of 3.
-      if ((opener.canOpen && opener.canClose) || (closer.canOpen && closer.canClose)) {
-        const ol = opener.item.len, cl = closer.item.len;
-        if ((ol + cl) % 3 === 0 && !(ol % 3 === 0 && cl % 3 === 0)) continue;
+    while (closer.active && closer.canClose && closer.item.len > 0) {
+      let matched = false;
+      for (let o = d - 1; o >= 0; o--) {
+        const opener = delims[o];
+        if (!opener.active || opener.ch !== closer.ch || !opener.canOpen) continue;
+        // Nested-emphasis blocking (see above): sum the outer opener's
+        // length and the lengths of the closers of all matched pairs fully
+        // between it and this closer (can-both closers only); if the total
+        // is a multiple of 3 and at least one intervening pair has a
+        // can-open-only opener and a can-both closer, the outer opener is
+        // blocked for this closer.
+        let blocked = false;
+        {
+          let s = opener.len;
+          let hasBlockingPair = false;
+          for (const p of matchedPairs) {
+            if (p.openIdx > o && p.closeIdx < d && p.open.ch === opener.ch) {
+              if (p.close.canOpen && p.close.canClose) s += p.close.len;
+              if (p.open.canOpen && !p.open.canClose && p.close.canOpen && p.close.canClose) hasBlockingPair = true;
+            }
+          }
+          blocked = hasBlockingPair && s % 3 === 0;
+        }
+        if (blocked) continue;
+        // Odd-match rule (spec): if either delimiter can both open and close,
+        // the sum of the run lengths must not be a multiple of 3 unless both
+        // lengths are multiples of 3.
+        if ((opener.canOpen && opener.canClose) || (closer.canOpen && closer.canClose)) {
+          const ol = opener.item.len, cl = closer.item.len;
+          if ((ol + cl) % 3 === 0 && !(ol % 3 === 0 && cl % 3 === 0)) continue;
+        }
+        let kind, use;
+        if (closer.ch === '~') {
+          if (opener.item.len < 2 || closer.item.len < 2) continue;
+          kind = 'del'; use = 2;
+        } else if (opener.item.len >= 2 && closer.item.len >= 2) {
+          kind = 'strong'; use = 2;
+        } else {
+          kind = 'em'; use = 1;
+        }
+        const m = { open: opener, close: closer, kind, use };
+        (opener.item.matches || (opener.item.matches = [])).push(m);
+        (closer.item.matches || (closer.item.matches = [])).push(m);
+        matchedPairs.push({ openIdx: o, closeIdx: d, open: opener, close: closer });
+        opener.item.len -= use;
+        closer.item.len -= use;
+        if (opener.item.len === 0) opener.active = false;
+        if (closer.item.len === 0) closer.active = false;
+        matched = true;
+        break;
       }
-      let kind, use;
-      if (closer.ch === '~') {
-        if (opener.item.len < 2 || closer.item.len < 2) continue;
-        kind = 'del'; use = 2;
-      } else if (opener.item.len >= 2 && closer.item.len >= 2) {
-        kind = 'strong'; use = 2;
-      } else {
-        kind = 'em'; use = 1;
-      }
-      const m = { open: opener, close: closer, kind, use };
-      (opener.item.matches || (opener.item.matches = [])).push(m);
-      (closer.item.matches || (closer.item.matches = [])).push(m);
-      opener.item.len -= use;
-      closer.item.len -= use;
-      if (opener.item.len === 0) opener.active = false;
-      if (closer.item.len === 0) closer.active = false;
-      if (closer.item.len === 0) break;
+      if (!matched) break;
     }
   }
 }
@@ -1808,6 +1845,11 @@ function renderInline(items, refs) {
           }
         }
       }
+      // Leftover delimiter length is literal text. For an opener the matched
+      // delimiters are the last ones in the run, so the leftover comes
+      // before the opening tag; for a closer the leftover comes after the
+      // closing tag (already emitted above).
+      if (it.len > 0) out += escapeHtml(it.ch.repeat(it.len));
       // Then open any matches for which this item is the opener.
       if (it.matches) {
         const opens = it.matches.filter((m) => m.open.item === it);
@@ -1817,8 +1859,6 @@ function renderInline(items, refs) {
           out += '<' + (m.kind === 'em' ? 'em' : m.kind === 'strong' ? 'strong' : 'del') + '>';
         }
       }
-      // Leftover delimiter length is literal text.
-      if (it.len > 0) out += escapeHtml(it.ch.repeat(it.len));
       continue;
     }
     if (it.k === 'linkopen') {
