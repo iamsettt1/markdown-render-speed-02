@@ -30,7 +30,11 @@ function escEntity(s, decodeNumeric) {
   return o;
 }
 const PUNCT = new Set('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~');
+const PUNCT_RE = /^[\p{P}\p{S}]$/u;
+// ASCII punctuation only: backslash escapes and link-label escapes
 function isPunct(ch) { return ch !== undefined && PUNCT.has(ch); }
+// Unicode punctuation/symbols: delimiter flanking (so £ € « count as punct)
+function isPunctUni(ch) { return ch !== undefined && (PUNCT.has(ch) || PUNCT_RE.test(ch)); }
 function isSpace(ch) { return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v' || ch === '\u00a0' || ch === '\u1680' || (ch >= '\u2000' && ch <= '\u200a') || ch === '\u202f' || ch === '\u205f' || ch === '\u3000' || ch === '\ufeff'; }
 function isWs(ch) { return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r'; }
 function isAlnum(ch) { return ch !== undefined && /[A-Za-z0-9]/.test(ch); }
@@ -350,13 +354,9 @@ function scanLabel(s, i) {
   return null;
 }
 function labelText(raw) {
-  // strip backslash escapes of punctuation for label comparison text
-  let o = '';
-  for (let i = 0; i < raw.length; i++) {
-    if (raw[i] === '\\' && i + 1 < raw.length && isPunct(raw[i + 1])) { o += raw[i + 1]; i++; }
-    else o += raw[i];
-  }
-  return o;
+  // labels are compared with backslashes intact (so foo\! != foo!, but
+  // ref\[ == ref\[); only the raw text is used for matching
+  return raw;
 }
 function parseInline(src, refs) {
   const nodes = [];
@@ -401,14 +401,14 @@ function parseInline(src, refs) {
       flushText();
       const startIdx = nodes.length;
       nodes.push({ type: 'text', text: '![' });
-      brackets.push({ nodeIdx: startIdx, isImage: true, active: true });
+      brackets.push({ nodeIdx: startIdx, isImage: true, active: true, srcIdx: i });
       i += 2; continue;
     }
     if (c === '[') {
       flushText();
       const startIdx = nodes.length;
       nodes.push({ type: 'text', text: '[' });
-      brackets.push({ nodeIdx: startIdx, isImage: false, active: true });
+      brackets.push({ nodeIdx: startIdx, isImage: false, active: true, srcIdx: i });
       i++; continue;
     }
     if (c === ']') {
@@ -418,20 +418,9 @@ function parseInline(src, refs) {
       if (bi === -1) { text += c; i++; continue; }
       const br = brackets[bi];
       const openIdx = br.nodeIdx;
-      // label raw text: nodes between openIdx and now, re-serialize text nodes
-      let labelRaw = '';
-      for (let n = openIdx + 1; n < nodes.length; n++) {
-        const nd = nodes[n];
-        if (nd.type === 'text') labelRaw += nd.text;
-        else if (nd.type === 'code') labelRaw += '`'.repeat(1) + nd.text + '`';
-        else if (nd.type === 'delim') labelRaw += nd.char.repeat(nd.len);
-        else if (nd.type === 'br') labelRaw += '  \n';
-        else if (nd.type === 'softbreak') labelRaw += '\n';
-        else if (nd.type === 'amp') labelRaw += '&';
-        else if (nd.type === 'html') labelRaw += nd.text;
-        else if (nd.type === 'link' || nd.type === 'image') labelRaw += nd.raw || '';
-      }
-      if (text) labelRaw += text;
+      // label raw text comes from the source span (backslashes intact), not
+      // from the parsed nodes (which resolve escapes)
+      const labelRaw = s.slice(br.srcIdx + (br.isImage ? 2 : 1), i);
       const label = labelText(labelRaw);
       const norm = normalizeLabel(label);
       let dest = null, title = null, endIdx = i + 1, ok = false, isRef = false, secondLabelSeen = false;
@@ -502,8 +491,8 @@ function parseInline(src, refs) {
       const foll = i + n < s.length ? s[i + n] : '';
       const prevWs = i === 0 || isSpace(prev);
       const follWs = i + n >= s.length || isSpace(foll);
-      const prevPunct = isPunct(prev);
-      const follPunct = isPunct(foll);
+      const prevPunct = isPunctUni(prev);
+      const follPunct = isPunctUni(foll);
       const leftFlank = !follWs && (!follPunct || prevWs || prevPunct);
       const rightFlank = !prevWs && (!prevPunct || follWs || follPunct);
       let canOpen, canClose;
@@ -572,7 +561,11 @@ function processEmphasis(nodes) {
         if (!op || op.type !== 'delim' || op.len === 0) continue;
         if (op.char !== n.char) continue;
         if (!op.canOpen) continue;
-        if (op.canClose && n.canOpen && (op.len + n.len) % 3 === 0) continue; // odd match rule
+        // rule of 3: if either delimiter can both open and close, a
+        // multiple-of-3 total length forbids the match (unless both are
+        // multiples of 3) — the inner pair then takes precedence
+        const eitherBoth = (op.canOpen && op.canClose) || (n.canOpen && n.canClose);
+        if (eitherBoth && (op.len + n.len) % 3 === 0 && !((op.len % 3 === 0) && (n.len % 3 === 0))) continue;
         foundIdx = openers[p]; foundPos = p; break;
       }
       if (foundIdx === -1) {
@@ -801,7 +794,8 @@ function tryParseRefDef(lines, idx, refs) {
   const lab = scanLabel(first, first.indexOf('['));
   if (!lab) return 0;
   const labelRaw = lab.text;
-  if (labelRaw.trim() === '' || labelRaw.includes('[')) return 0;
+  // a label may not contain an unescaped '[' (an escaped \[ is fine)
+  if (labelRaw.trim() === '' || /(?<!\\)\[/.test(labelRaw)) return 0;
   let rest = first.slice(lab.end);
   if (!/^:/.test(rest)) return 0;
   rest = rest.slice(1);
