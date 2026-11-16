@@ -100,12 +100,15 @@ function normalizeLabel(s) {
   }
   return o.trim();
 }
-function encodeUri(u) {
-  // percent-encode like marked: encodeURI plus encode ( ) ' etc. Keep it simple.
+function encodeUri(u, encBrackets) {
+  // percent-encode like marked: encodeURI plus encode ( ) ' etc. '%' is
+  // never re-encoded (a valid %XX stays, a bare % stays too).
   let o = '';
   for (let i = 0; i < u.length; i++) {
     const c = u[i], code = u.charCodeAt(i);
-    if (code < 128 && /[A-Za-z0-9\-_.!~*'();\/?:@&=+$,#\[\]]/.test(c)) o += c;
+    if (c === '%') { o += c; continue; }
+    if (code < 128 && /[A-Za-z0-9\-_.!~*'();\/?:@&=+$,#]/.test(c)) o += c;
+    else if (code < 128 && (c === '[' || c === ']')) o += encBrackets ? encodeURIComponent(c) : c;
     else o += encodeURIComponent(c);
   }
   return o;
@@ -181,13 +184,13 @@ function scanAutolink(s, i) {
   const m = /^<([A-Za-z][A-Za-z0-9+.-]{1,31}):([^<>\s]*)>/.exec(s.slice(i));
   if (m) {
     const url = m[1] + ':' + m[2];
-    const href = encodeUri(cleanUrl(url));
+    const href = encodeUri(cleanUrl(url), true);
     return [{ type: 'link', href, title: null, children: [{ type: 'text', text: url }] }, i + m[0].length];
   }
   const em = /^<([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/.exec(s.slice(i));
   if (em) {
     const addr = em[1];
-    return [{ type: 'link', href: 'mailto:' + encodeUri(cleanUrl(addr)), title: null, children: [{ type: 'text', text: addr }] }, i + em[0].length];
+    return [{ type: 'link', href: 'mailto:' + encodeUri(cleanUrl(addr), true), title: null, children: [{ type: 'text', text: addr }] }, i + em[0].length];
   }
   return null;
 }
@@ -225,12 +228,12 @@ function scanExtendedAutolink(s, i) {
     if (!m) return null;
     let url = trimUrlEnd(m[0]);
     if (url.length < 5) return null;
-    return [{ type: 'link', href: encodeUri('http://' + cleanUrl(url)), title: null, children: [{ type: 'text', text: url }] }, i + url.length];
+    return [{ type: 'link', href: encodeUri('http://' + cleanUrl(url), true), title: null, children: [{ type: 'text', text: url }] }, i + url.length];
   }
   m = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>]+/.exec(s.slice(i));
   if (m) {
     let url = trimUrlEnd(m[0]);
-    return [{ type: 'link', href: encodeUri(cleanUrl(url)), title: null, children: [{ type: 'text', text: url }] }, i + url.length];
+    return [{ type: 'link', href: encodeUri(cleanUrl(url), true), title: null, children: [{ type: 'text', text: url }] }, i + url.length];
   }
   m = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(s.slice(i));
   if (m) {
@@ -243,7 +246,7 @@ function scanExtendedAutolink(s, i) {
     }
     addr = trimUrlEnd(addr);
     if (!addr.includes('@')) return null;
-    return [{ type: 'link', href: 'mailto:' + encodeUri(cleanUrl(addr)), title: null, children: [{ type: 'text', text: addr }] }, i + addr.length];
+    return [{ type: 'link', href: 'mailto:' + encodeUri(cleanUrl(addr), true), title: null, children: [{ type: 'text', text: addr }] }, i + addr.length];
   }
   return null;
 }
@@ -276,8 +279,7 @@ function parseLinkDest(s, i) {
     }
     dest += c; k++;
   }
-  if (k === j) return null;
-  // trim trailing ')' handled by balance; also handle empty () destination -> ''
+  if (k === j) return ['', k]; // empty destination, e.g. [link]()
   return [dest, k];
 }
 function parseLinkTitle(s, i) {
@@ -415,9 +417,8 @@ function parseInline(src, refs) {
       if (text) labelRaw += text;
       const label = labelText(labelRaw);
       const norm = normalizeLabel(label);
-      let dest = null, title = null, endIdx = i + 1, ok = false, isRef = false;
-      if (norm === '' || label.trim() === '') { /* empty label: not a link */ }
-      else {
+      let dest = null, title = null, endIdx = i + 1, ok = false, isRef = false, secondLabelSeen = false;
+      {
         const after = s[i + 1];
         if (after === '(') {
           const d = parseLinkDest(s, i + 2);
@@ -434,6 +435,7 @@ function parseInline(src, refs) {
         } else if (after === '[') {
           const l2 = scanLabel(s, i + 1);
           if (l2) {
+            secondLabelSeen = true;
             const norm2 = normalizeLabel(labelText(l2.text));
             if (l2.text.trim() === '') { // collapsed: [foo][]
               const ref = refs.get(norm);
@@ -444,17 +446,17 @@ function parseInline(src, refs) {
             }
           }
         }
-        if (!ok) {
-          // shortcut reference
+        if (!ok && !secondLabelSeen) {
+          // shortcut reference (only when no second bracket label was present)
           const ref = refs.get(norm);
           if (ref) { dest = ref.dest; title = ref.title; endIdx = i + 1; ok = true; isRef = true; }
         }
       }
       if (ok) {
-        // link (not image) may not contain a link/image node
+        // a link may contain an image, but not another link
         let hasLink = false;
         if (!br.isImage) {
-          for (let n = openIdx + 1; n < nodes.length; n++) if (nodes[n].type === 'link' || nodes[n].type === 'image') { hasLink = true; break; }
+          for (let n = openIdx + 1; n < nodes.length; n++) if (nodes[n].type === 'link') { hasLink = true; break; }
         }
         if (hasLink) { br.active = false; text += c; i++; continue; }
         flushText();
@@ -508,9 +510,9 @@ function parseInline(src, refs) {
       // possible extended autolink: scheme:// or email
       const a = scanExtendedAutolink(s, i);
       if (a) { pushNode(a[0]); i = a[1]; continue; }
-      // plain word: consume run fast
+      // plain word: consume run fast (stop before '_' — it is a delimiter)
       let j = i;
-      while (j < s.length && (isAlnum(s[j]) || s[j] === '_' || s[j] === '-')) j++;
+      while (j < s.length && (isAlnum(s[j]) || s[j] === '-')) j++;
       if (j === i) j = i + 1;
       text += s.slice(i, j); i = j; continue;
     }
@@ -595,13 +597,9 @@ function processEmphasis(nodes) {
         for (let p = 0; p < openers.length; p++) if (openers[p] > closerPos) openers[p]--;
         i = closerPos;
       } else {
-        // closer partially used: it sits right after wrapped
-        if (n.canOpen) {
-          // re-register closer as a potential opener at its new position
-          const closerPos = (op.len === 0 ? foundIdx + 1 : foundIdx + 2);
-          openers.push(closerPos);
-        }
-        i = (op.len === 0 ? foundIdx + 1 : foundIdx + 2) + 1;
+        // closer partially used: re-examine it at its new position so the
+        // remainder can match an outer opener (e.g. ___ closes __, then _)
+        i = (op.len === 0 ? foundIdx + 1 : foundIdx + 2);
       }
       // clean dead opener entries
       for (let p = openers.length - 1; p >= 0; p--) if (openers[p] < 0 || !nodes[openers[p]] || nodes[openers[p]].type !== 'delim') openers.splice(p, 1);
@@ -746,6 +744,7 @@ function splitTableRow(text) {
   let start = 0, end = t.length;
   if (t.startsWith('|')) start = 1;
   if (t.endsWith('|') && end > start) end--;
+  i = start;
   while (i < end) {
     const c = t[i];
     if (c === '\\' && i + 1 < end && t[i + 1] === '|') { cur += '|'; i += 2; continue; }
@@ -756,10 +755,10 @@ function splitTableRow(text) {
         if (t[k] === '`') { let m = 0; while (k + m < end && t[k + m] === '`') m++; if (m === n) { found = k; break; } k += m; }
         else k++;
       }
-      if (found !== -1) { cur += t.slice(i, found + n); i = found + n; continue; }
+      if (found !== -1) { cur += t.slice(i, found + n).replace(/\\\|/g, '|'); i = found + n; continue; }
       cur += c; i++; continue;
     }
-    if (c === '|' && i >= start) { cells.push(cur); cur = ''; i++; continue; }
+    if (c === '|') { cells.push(cur); cur = ''; i++; continue; }
     cur += c; i++;
   }
   cells.push(cur);
@@ -1269,8 +1268,9 @@ function parse(src) {
       const nextC = contentOf(i + 1);
       if (nextC !== null) {
         const aligns = parseTableDelim(nextC);
-        if (aligns && (nextC.includes('|') || (content.includes('|') && aligns.length > 1))) {
-          const headerCells = splitTableRow(content);
+        const headerCells0 = splitTableRow(content);
+        if (aligns && aligns.length === headerCells0.length && (nextC.includes('|') || (content.includes('|') && aligns.length > 1))) {
+          const headerCells = headerCells0;
           const cols = aligns.length;
           const header = headerCells.slice(0, cols);
           while (header.length < cols) header.push('');
@@ -1411,7 +1411,9 @@ function renderNode(node, refs, tight) {
         const a = node.aligns[c];
         o += '<th' + (a ? ' align="' + (a === 'l' ? 'left' : a === 'c' ? 'center' : 'right') + '"' : '') + '>' + renderInline(parseInline(node.header[c], refs)) + '</th>\n';
       }
-      o += '</tr>\n</thead>\n<tbody>';
+      o += '</tr>\n</thead>\n';
+      if (node.rows.length === 0) return o + '</table>\n';
+      o += '<tbody>';
       for (const row of node.rows) {
         o += '<tr>\n';
         for (let c = 0; c < row.length; c++) {
