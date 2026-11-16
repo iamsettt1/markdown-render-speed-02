@@ -706,6 +706,20 @@ function processEmphasis(nodes) {
         // multiples of 3) — the inner pair then takes precedence
         const eitherBoth = (op.canOpen && op.canClose) || (n.canOpen && n.canClose);
         if (eitherBoth && (op.len + n.len) % 3 === 0 && !((op.len % 3 === 0) && (n.len % 3 === 0))) continue;
+        // a blocking inner pair forbids this outer match: if the span
+        // between this opener and the closer contains an emphasis node
+        // formed by a can-only-open opener and a can-open closer, and
+        // the four delimiter lengths sum to a multiple of 3, the outer
+        // match is refused (marked: '*a **b**c*' stays literal, while
+        // '*a **b** c*' and '*a**b**c*' form it)
+        let blocked = false;
+        for (let q = openers[p] + 1; q < i; q++) {
+          const w = nodes[q];
+          if ((w.type === 'em' || w.type === 'strong' || w.type === 'del') && w.innerOpLen !== undefined &&
+              w.char === op.char && w.innerClCanOpen && w.innerOpOnlyOpen &&
+              (op.len + n.len + w.innerOpLen + w.innerClLen) % 3 === 0) { blocked = true; break; }
+        }
+        if (blocked) continue;
         foundIdx = openers[p]; foundPos = p; break;
       }
       if (foundIdx === -1) {
@@ -720,6 +734,12 @@ function processEmphasis(nodes) {
       // wrap nodes between opener and closer
       const inner = nodes.slice(foundIdx + 1, i);
       const wrapped = { type: tag, children: inner };
+      // record the forming pair for the outer-match block rule (lengths
+      // as they were at match time, before the use is subtracted)
+      wrapped.char = op.char;
+      wrapped.innerOpLen = op.len; wrapped.innerClLen = n.len;
+      wrapped.innerOpOnlyOpen = op.canOpen && !op.canClose;
+      wrapped.innerClCanOpen = n.canOpen;
       // adjust lengths
       op.len -= use; n.len -= use;
       // remove nodes between, insert wrapped
