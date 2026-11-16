@@ -284,7 +284,11 @@ class Parser {
         const inList = stack.some((b) => b.t === 'list');
         const isListMarker = inList && parseListMarker(line.s, indentColsOf(line.s, line.col)) !== null;
         const isLazyPara = leaf && leaf.t === 'paragraph' && !startsInterruptBlock(line.s) && !isListMarker;
-        if (!isLazyPara) {
+        // A fenced code block that already has content keeps its later
+        // lines as literal content even when they do not match the
+        // enclosing container's indent; an empty one closes on mismatch.
+        const isFencedCode = leaf && leaf.t === 'code' && leaf.fenced && leaf.lines.length > 0;
+        if (!isLazyPara && !isFencedCode) {
           // Close the leaf and any containers deeper than `matched`.
           if (leaf) {
             // An HTML block closed because the next line left its container
@@ -297,6 +301,7 @@ class Parser {
       }
       if (blank) {
         if (leaf && leaf.t === 'paragraph') { this.finalizeLeaf(leaf, stack); leaf = null; }
+        else if (leaf && leaf.t === 'table') { this.finalizeLeaf(leaf, stack); leaf = null; }
         else if (leaf && leaf.t === 'html') {
           if (leaf.htmlType === 6 || leaf.htmlType === 7) {
             // An HTML block ending at a blank line has no trailing newline.
@@ -1226,7 +1231,7 @@ function renderBlock(b, refs) {
         const attr = a ? ' align="' + a + '"' : '';
         out += '<th' + attr + '>' + parseInline(b.header[i], refs) + '</th>\n';
       }
-      out += '</tr>\n</thead>\n<tbody>\n';
+      out += '</tr>\n</thead>\n<tbody>';
       for (const row of b.rows) {
         const cells = splitTableRow(row);
         out += '<tr>\n';
@@ -1850,8 +1855,11 @@ function processEmphasis(items, delims) {
         }
         let kind, use;
         if (closer.ch === '~') {
-          if (opener.item.len < 2 || closer.item.len < 2) continue;
-          kind = 'del'; use = 2;
+          // Strikethrough: ~~ (use 2) or a single ~ (use 1); marked renders
+          // both as <del>.
+          if (opener.item.len >= 2 && closer.item.len >= 2) { kind = 'del'; use = 2; }
+          else if (opener.item.len >= 1 && closer.item.len >= 1) { kind = 'del'; use = 1; }
+          else continue;
         } else if (opener.item.len >= 2 && closer.item.len >= 2) {
           kind = 'strong'; use = 2;
         } else {
