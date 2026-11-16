@@ -285,9 +285,10 @@ class Parser {
         const isListMarker = inList && parseListMarker(line.s, indentColsOf(line.s, line.col)) !== null;
         const isLazyPara = leaf && leaf.t === 'paragraph' && !startsInterruptBlock(line.s) && !isListMarker;
         // A fenced code block that already has content keeps its later
-        // lines as literal content even when they do not match the
-        // enclosing container's indent; an empty one closes on mismatch.
-        const isFencedCode = leaf && leaf.t === 'code' && leaf.fenced && leaf.lines.length > 0;
+        // lines as literal content even when they do not match an enclosing
+        // LIST item's indent; a failed blockquote marker still closes it.
+        const failedIsBlockquote = failedAt !== -1 && stack[failedAt] && stack[failedAt].t === 'blockquote';
+        const isFencedCode = leaf && leaf.t === 'code' && leaf.fenced && leaf.lines.length > 0 && !failedIsBlockquote;
         if (!isLazyPara && !isFencedCode) {
           // Close the leaf and any containers deeper than `matched`.
           if (leaf) {
