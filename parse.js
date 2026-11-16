@@ -1560,6 +1560,13 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
   // to (not including) the ']' with a link node, and drop the ']' + suffix.
   const openPos = items.indexOf(openItem);
   const children = items.slice(openPos + 1);
+  // Mark the delimiters inside this link's text: they may match each other
+  // but not delimiters outside the link (cm-473/474/521/534/535).
+  const childSet = new Set(children);
+  const linkId = ++tryResolveLink._nextLinkId;
+  for (const e of delims) {
+    if (e.item && childSet.has(e.item)) e.linkId = linkId;
+  }
   // Remove any nested linkopen items that are still active inside (they are
   // literal text now); keep them as text.
   for (const ch of children) {
@@ -1573,6 +1580,7 @@ function tryResolveLink(text, i, items, delims, openersBottom, refs) {
   }
   return { end, openersBottom: openerIdx };
 }
+tryResolveLink._nextLinkId = 0;
 
 // The raw text of a link's label (the items between the opener and ']'),
 // or null if it contains a link/code span that makes it unusable as a label.
@@ -1773,6 +1781,9 @@ function processEmphasis(items, delims) {
       for (let o = d - 1; o >= 0; o--) {
         const opener = delims[o];
         if (!opener.active || opener.ch !== closer.ch || !opener.canOpen) continue;
+        // Link boundary: delimiters inside a link's text cannot match
+        // delimiters outside it (or inside a different link).
+        if (opener.linkId !== closer.linkId) continue;
         // Overlap rule: an opener inside an already-matched pair cannot
         // match a closer outside that pair (emphasis may nest, not cross).
         let overlaps = false;
