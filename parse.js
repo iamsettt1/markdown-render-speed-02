@@ -386,6 +386,40 @@ function parseLinkTitle(s, i) {
   if (k >= s.length) return [null, i];
   return [title, k + 1];
 }
+// Convert every top-level emphasis delimiter in the label span to literal
+// text, so no emphasis forms there (marked leaves all emphasis unformed in
+// a label rejected by the backtick-span rule).
+function neutralizeLabelDelims(nodes, openIdx) {
+  for (let k = openIdx + 1; k < nodes.length; k++) {
+    const n = nodes[k];
+    if (n.type === 'delim' && n.len > 0) {
+      nodes[k] = { type: 'text', text: n.char.repeat(n.len) };
+    }
+  }
+}
+// Does the label span s[from..to) hold a code span (exact-length backtick
+// match) whose content contains a backtick and which is followed by more
+// label text before the ']' at `to`? (marked's label-scan rule that rejects
+// such a label.)
+function labelHasOldHackSpan(s, from, to) {
+  for (let j = from; j < to; j++) {
+    if (s[j] === '\\' && j + 1 < s.length) { j++; continue; }
+    if (s[j] !== '`') continue;
+    let n = 0; while (j + n < s.length && s[j + n] === '`') n++;
+    let k = j + n, found = -1, flen = 0;
+    while (k < s.length) {
+      if (s[k] === '`') {
+        let m = 0; while (k + m < s.length && s[k + m] === '`') m++;
+        if (m === n) { found = k; flen = m; break; }
+        k += m;
+      } else k++;
+    }
+    if (found !== -1 && found < to && found + flen < to &&
+        s.slice(j + n, found).includes('`')) return true;
+    j += n - 1;
+  }
+  return false;
+}
 function scanLabel(s, i) {
   // s[i] === '['; returns {end (index after matching ]), text, raw} or null.
   // text excludes the outer brackets.
@@ -601,15 +635,25 @@ function parseInline(src, refs, lk) {
       // label raw text comes from the source span (backslashes intact), not
       // from the parsed nodes (which resolve escapes)
       const labelRaw = s.slice(br.srcIdx + (br.isImage ? 2 : 1), i);
-      // a ']' only ends the label while the label scanner is not inside a
-      // code span (see scanLabel): with an odd/unmatched backtick run the
-      // ']' is literal text and the bracket stays active for a later ']'
-      if (labelRaw.includes('`')) {
-        const st = labelScanState(s, br.srcIdx + (br.isImage ? 2 : 1), i);
-        if (st.inCode || st.depth !== 1) { text += c; i++; continue; }
-      }
       const label = labelText(labelRaw);
       const norm = normalizeLabel(label);
+      // a ']' only ends the label while the label scanner is not inside a
+      // code span (see scanLabel): with an odd/unmatched backtick run the
+      // ']' is literal text and the bracket stays active for a later ']'.
+      // When a link is actually attempted here and the label is rejected
+      // because of a backtick-holding code span, marked leaves ALL emphasis
+      // in the label unformed — neutralize its delimiters.
+      if (labelRaw.includes('`')) {
+        const st = labelScanState(s, br.srcIdx + (br.isImage ? 2 : 1), i);
+        if (st.inCode || st.depth !== 1) {
+          const after = s[i + 1];
+          if ((after === '(' || after === '[' || refs.has(norm)) &&
+              labelHasOldHackSpan(s, br.srcIdx + (br.isImage ? 2 : 1), i)) {
+            neutralizeLabelDelims(nodes, openIdx);
+          }
+          text += c; i++; continue;
+        }
+      }
       let dest = null, title = null, endIdx = i + 1, ok = false, isRef = false, secondLabelSeen = false;
       {
         const after = s[i + 1];
