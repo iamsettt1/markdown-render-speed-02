@@ -976,12 +976,19 @@ function parse(src) {
     const depth = m.depth, ls = m.ls, cols = m.cols, allMatched = m.allMatched;
     const remainderEmpty = ls.i >= ls.s.length && ls.tab === 0;
     const blank = rawBlank || remainderEmpty;
+    // whether the line before this one was blank (captured before it is reset)
+    const prevBlank = lastLineBlank;
     if (blank) {
       closePara();
-      // mark looseness: blank line inside an item with content
+      // mark looseness: a blank line marks every item on the matched chain,
+      // walking up from the deepest container, until a non-list block
+      // (e.g. a blockquote) is reached — a blank inside such a block does
+      // not loosen the enclosing list
       for (let d = depth - 1; d >= 0; d--) {
         const node = stack[d];
-        if (node.type === 'item' && node.children.length > 0) { node.sawBlank = true; break; }
+        if (node.type === 'item') { node.sawBlank = true; continue; }
+        if (node.type === 'list') continue;
+        break;
       }
       finalizeStackTo(depth);
       lastLineBlank = true;
@@ -1132,7 +1139,7 @@ function parse(src) {
             if (para && paraParent === t) closePara();
             stack.pop();
           }
-          if (list.children.length > 0 && list.children[list.children.length - 1].sawBlank) list.loose = true;
+          if (list.children.length > 0 && prevBlank && list.children[list.children.length - 1].sawBlank) list.loose = true;
         } else {
           // not reusing: step out of a list (or an item the marker precedes)
           if (top.type === 'list') {
