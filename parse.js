@@ -217,10 +217,12 @@ function trimUrlEnd(u) {
   while (end > 0) {
     const c = u[end - 1];
     if (c === ';') {
-      // entity-like ending: &name; -> cut back to '&'
+      // an entity-like ending &name; is cut back to the '&' (the whole
+      // entity stays outside the link); a bare ';' is trimmed like any
+      // other trailing punctuation
       const amp = u.lastIndexOf('&', end - 1);
       if (amp !== -1 && /^&[A-Za-z0-9]+;$/.test(u.slice(amp, end))) { end = amp; continue; }
-      break;
+      end--; continue;
     }
     if ('?!.,:;*_~'.includes(c)) { end--; continue; }
     if (c === ')') {
@@ -1345,12 +1347,19 @@ function parse(src) {
       let htmlText = htmlLines.join('\n');
       const atEof = j >= lines.length;
       // keep the trailing newline only when the next line is not blank and
-      // still inside this container (or at EOF when the last line had one)
+      // still inside this container (or at EOF when the last line had one);
+      // for types 1-5 (which end at a marker, not at a blank line) a
+      // whitespace-only next line still counts as a line, so only a truly
+      // empty next line drops the newline
       let keepNl = false;
       if (atEof) keepNl = lines.length > 0 && lines[lines.length - 1].nl;
-      else if (!/^[ \t]*$/.test(lines[j].text)) {
-        const nm = matchContainers(lines[j].text, stack);
-        keepNl = nm.allMatched;
+      else {
+        const nextBlank = /^[ \t]*$/.test(lines[j].text);
+        const nextEmpty = lines[j].text.length === 0;
+        if ((hbType <= 5 && !nextEmpty) || (hbType >= 6 && !nextBlank)) {
+          const nm = matchContainers(lines[j].text, stack);
+          keepNl = nm.allMatched;
+        }
       }
       if (keepNl) htmlText += '\n';
       addChild({ type: 'htmlblock', text: htmlText });
