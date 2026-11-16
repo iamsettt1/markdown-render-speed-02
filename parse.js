@@ -1555,7 +1555,18 @@ function parse(src) {
           let j = i + 2;
           while (j < lines.length) {
             const rc = contentOf(j);
-            if (rc === null || /^[ \t]*$/.test(rc)) break;
+            if (rc === null) break;
+            // a whitespace-only line ends the table — except a line whose
+            // only content is whitespace with a tab expanding to exactly
+            // 4 columns, which marked keeps as an all-empty row (a bare
+            // tab, or spaces + tab reaching column 4); 4 spaces or 2 tabs
+            // end the table instead
+            if (/^[ \t]*$/.test(rc)) {
+              let w = 0, hasTab = false;
+              for (const ch of rc) { if (ch === '\t') { hasTab = true; w += 4 - (w % 4); } else w++; }
+              if (!(hasTab && w === 4)) break;
+              // fall through: splitTableRow gives [''] -> padded to cols
+            }
             // a row cannot start a new block (blockquote, heading, fence, list)
             if (/^ {0,3}>/.test(rc) || /^ {0,3}#{1,6}(?:[ \t]+|$)/.test(rc) || /^ {0,3}(`{3,}|~{3,})/.test(rc) || listMarker(rc)) break;
             const cells = splitTableRow(rc).slice(0, cols);
