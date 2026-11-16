@@ -201,12 +201,12 @@ function scanAutolink(s, i) {
   if (m) {
     const url = m[1] + ':' + m[2];
     const href = encodeUri(cleanUrl(url), true);
-    return [{ type: 'link', href, title: null, children: [{ type: 'text', text: url }] }, i + m[0].length];
+    return [{ type: 'link', href, title: null, auto: 'angle', children: [{ type: 'text', text: url }] }, i + m[0].length];
   }
   const em = /^<([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/.exec(s.slice(i));
   if (em) {
     const addr = em[1];
-    return [{ type: 'link', href: 'mailto:' + encodeUri(cleanUrl(addr), true), title: null, children: [{ type: 'text', text: addr }] }, i + em[0].length];
+    return [{ type: 'link', href: 'mailto:' + encodeUri(cleanUrl(addr), true), title: null, auto: 'angle', children: [{ type: 'text', text: addr }] }, i + em[0].length];
   }
   return null;
 }
@@ -234,47 +234,73 @@ function trimUrlEnd(u) {
   }
   return u.slice(0, end);
 }
-function scanExtendedAutolink(s, i) {
+function scanExtendedAutolink(s, i, nodes) {
   // www. / email / scheme autolinks starting at i; returns [node, nextIndex] or null
   const prev = i > 0 ? s[i - 1] : '';
-  if (prev && (isAlnum(prev) || prev === '_' || prev === '/')) return null;
+  // The trailing _ of an address is an emphasis closer (not part of the
+  // address) exactly when the most recent _ delimiter in the current nodes
+  // can open. The same test decides whether a _ right before the autolink
+  // is an emphasis opener rather than part of a longer address.
+  const prevIsOpener = () => {
+    if (!nodes) return false;
+    for (let k = nodes.length - 1; k >= 0; k--) {
+      const n = nodes[k];
+      if (n.type === 'delim' && n.char === '_') return !!n.canOpen;
+    }
+    return false;
+  };
+  if (prev && (isAlnum(prev) || prev === '/')) return null;
+  if (prev === '_' && !prevIsOpener()) return null;
+  // A raw address match may end in a _ or - run. A trailing - always kills
+  // the autolink; a trailing _ run is stripped when it is the emphasis
+  // closer (an opener is pending) and kills it otherwise. A - or _ right
+  // after the match kills it too (same _ exception).
+  const cleanEmailAddr = (addrRaw, after) => {
+    if (addrRaw.endsWith('-')) return null;
+    if (/[_]+$/.test(addrRaw)) {
+      if (!prevIsOpener()) return null;
+      addrRaw = addrRaw.replace(/_+$/, '');
+    }
+    if (after === '-' || (after === '_' && !prevIsOpener())) return null;
+    if (!/[A-Za-z0-9]/.test(addrRaw.slice(-1))) return null;
+    return addrRaw;
+  };
   let m;
   if (s.startsWith('www.', i)) {
-    m = /^www\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+(?:[/?#][^\s<>]*)?/.exec(s.slice(i));
+    m = /^www\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+(?:[/?#][^\s<>\]]*)?/.exec(s.slice(i));
     if (!m) return null;
     let url = trimUrlEnd(m[0]);
     if (url.length < 5) return null;
-    return [{ type: 'link', href: encodeUri('http://' + cleanUrl(url), true), title: null, children: [{ type: 'text', text: url }] }, i + url.length];
+    return [{ type: 'link', href: encodeUri('http://' + cleanUrl(url), true), title: null, auto: 'ext', children: [{ type: 'text', text: url }] }, i + url.length];
   }
-  m = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>]+/.exec(s.slice(i));
+  m = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>\]]+/.exec(s.slice(i));
   if (m) {
     let url = trimUrlEnd(m[0]);
-    return [{ type: 'link', href: encodeUri(cleanUrl(url), true), title: null, children: [{ type: 'text', text: url }] }, i + url.length];
+    return [{ type: 'link', href: encodeUri(cleanUrl(url), true), title: null, auto: 'ext', children: [{ type: 'text', text: url }] }, i + url.length];
   }
   // scheme:email[/path] for mailto: and xmpp: (lowercase schemes only);
   // the whole thing is one link, with at most one path segment
-  m = /^(mailto|xmpp):([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)(\/[^\s<>\/]+)?/.exec(s.slice(i));
+  m = /^(mailto|xmpp):([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(\/[^\s<>\/\]]+)?/.exec(s.slice(i));
   if (m) {
-    let url = trimUrlEnd(m[0]);
-    const after = s[i + url.length];
-    if (url.endsWith('-') || url.endsWith('_')) return null;
-    if (after === '-' || after === '_') return null;
-    return [{ type: 'link', href: encodeUri(cleanUrl(url), true), title: null, children: [{ type: 'text', text: url }] }, i + url.length];
-  }
-  m = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(s.slice(i));
-  if (m) {
-    let addr = m[0];
-    // a trailing - or _ right after the match invalidates the whole autolink
-    const after = s[i + addr.length];
-    if (after === '-' || after === '_') return null;
-    if (addr.endsWith('-')) return null;
-    if (addr.endsWith('_') && !addr.endsWith('__')) {
-      // a _ closing a _..._ pair is ok; approximate: trim single trailing _
-      addr = addr.slice(0, -1);
+    const after = s[i + m[0].length];
+    if (m[3]) {
+      let url = trimUrlEnd(m[0]);
+      if (url.endsWith('-')) return null;
+      if (after === '-' || after === '_') return null;
+      return [{ type: 'link', href: encodeUri(cleanUrl(url), true), title: null, auto: 'ext', children: [{ type: 'text', text: url }] }, i + url.length];
     }
-    addr = trimUrlEnd(addr);
+    const addr = cleanEmailAddr(m[2], after);
+    if (!addr) return null;
+    const url = m[1] + ':' + addr;
+    return [{ type: 'link', href: encodeUri(cleanUrl(url), true), title: null, auto: 'ext', children: [{ type: 'text', text: url }] }, i + url.length];
+  }
+  m = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+/.exec(s.slice(i));
+  if (m) {
+    const after = s[i + m[0].length];
+    const addr = cleanEmailAddr(m[0], after);
+    if (!addr) return null;
     if (!addr.includes('@')) return null;
-    return [{ type: 'link', href: 'mailto:' + encodeUri(cleanUrl(addr), true), title: null, children: [{ type: 'text', text: addr }] }, i + addr.length];
+    return [{ type: 'link', href: 'mailto:' + encodeUri(cleanUrl(addr), true), title: null, auto: 'ext', children: [{ type: 'text', text: addr }] }, i + addr.length];
   }
   return null;
 }
@@ -370,7 +396,21 @@ function labelText(raw) {
   // ref\[ == ref\[); only the raw text is used for matching
   return raw;
 }
-function parseInline(src, refs) {
+function demoteExt(children) {
+  for (let k = 0; k < children.length; k++) {
+    const n = children[k];
+    if (n.type === 'link' && n.auto === 'ext') {
+      children[k] = { type: 'text', text: n.children && n.children[0] ? n.children[0].text : '' };
+    } else if (n.children) demoteExt(n.children);
+  }
+}
+function parseInline(src, refs, lk) {
+  // lk tracks a leaked unclosed inline <a> tag: while set, extended
+  // autolinks (email/www/scheme) are suppressed in this and later inline
+  // spans of the same parse() call, until a </a> tag resets it. Angle
+  // autolinks, explicit links and images are not suppressed. lk is a fresh
+  // object per parse() call, so parse stays stateless across calls.
+  if (!lk) lk = { inLink: false };
   const nodes = [];
   const brackets = []; // {nodeIdx, isImage, active}
   let text = '';
@@ -399,7 +439,13 @@ function parseInline(src, refs) {
       const a = scanAutolink(s, i);
       if (a) { pushNode(a[0]); i = a[1]; continue; }
       const h = scanHtmlInline(s, i);
-      if (h) { pushNode({ type: 'html', text: h[0] }); i = h[1]; continue; }
+      if (h) {
+        // an unclosed inline <a> leaks: it suppresses extended autolinks
+        // until a matching </a> (case-insensitive, any case of the tag)
+        if (/^<a(?=[\s>\/])/i.test(h[0])) lk.inLink = true;
+        else if (/^<\/a(?=[\s>\/])/i.test(h[0])) lk.inLink = false;
+        pushNode({ type: 'html', text: h[0] }); i = h[1]; continue;
+      }
       text += c; i++; continue;
     }
     if (c === '\n') {
@@ -471,14 +517,18 @@ function parseInline(src, refs) {
         }
       }
       if (ok) {
-        // a link may contain an image, but not another link
+        // a link may contain an image, but not another link; autolinks
+        // (angle or extended) inside the label do not count as links
         let hasLink = false;
         if (!br.isImage) {
-          for (let n = openIdx + 1; n < nodes.length; n++) if (nodes[n].type === 'link') { hasLink = true; break; }
+          for (let n = openIdx + 1; n < nodes.length; n++) if (nodes[n].type === 'link' && !nodes[n].auto) { hasLink = true; break; }
         }
         if (hasLink) { br.active = false; text += c; i++; continue; }
         flushText();
         const children = nodes.splice(openIdx + 1);
+        // extended autolinks inside a forming link demote to plain text;
+        // angle autolinks stay as nested anchors
+        if (!br.isImage) demoteExt(children);
         // remove the opener text node
         nodes.splice(openIdx, 1);
         const href = dest === '' ? '' : encodeUri(cleanUrl(dest));
@@ -520,13 +570,13 @@ function parseInline(src, refs) {
       i += n; continue;
     }
     if (c === 'w' && s.startsWith('www.', i)) {
-      const a = scanExtendedAutolink(s, i);
+      const a = lk.inLink ? null : scanExtendedAutolink(s, i, nodes);
       if (a) { pushNode(a[0]); i = a[1]; continue; }
       text += c; i++; continue;
     }
     if (isAlpha(c) || isDigit(c)) {
       // possible extended autolink: scheme:// or email
-      const a = scanExtendedAutolink(s, i);
+      const a = lk.inLink ? null : scanExtendedAutolink(s, i, nodes);
       if (a) { pushNode(a[0]); i = a[1]; continue; }
       // plain word: consume run fast (stop before '_' — it is a delimiter)
       let j = i;
@@ -1404,7 +1454,7 @@ function parse(src) {
     }
   }
   closePara();
-  return renderNode(root, refs, null);
+  return renderNode(root, refs, null, { inLink: false });
 }
 function stripFenceIndent(line, nChars, baseCol) {
   // Remove up to nChars columns of leading whitespace from a fenced-code
@@ -1474,22 +1524,23 @@ function listCanInterrupt(lm, lines, idx, stack) {
 }
 
 // ---- rendering ----
-function renderNode(node, refs, tight) {
+function renderNode(node, refs, tight, lk) {
+  if (!lk) lk = { inLink: false };
   switch (node.type) {
     case 'doc': {
       let o = '';
-      for (const ch of node.children) o += renderNode(ch, refs, false);
+      for (const ch of node.children) o += renderNode(ch, refs, false, lk);
       return o;
     }
     case 'blockquote': {
       let o = '<blockquote>\n';
-      for (const ch of node.children) o += renderNode(ch, refs, false);
+      for (const ch of node.children) o += renderNode(ch, refs, false, lk);
       return o + '</blockquote>\n';
     }
     case 'list': {
       const tag = node.ordered ? 'ol' : 'ul';
       let o = node.ordered && node.start !== 1 ? '<ol start="' + node.start + '">\n' : '<' + tag + '>\n';
-      for (const ch of node.children) o += renderNode(ch, refs, !node.loose);
+      for (const ch of node.children) o += renderNode(ch, refs, !node.loose, lk);
       return o + '</' + tag + '>\n';
     }
     case 'item': {
@@ -1503,24 +1554,24 @@ function renderNode(node, refs, tight) {
           const input = '<input' + (checked ? ' checked=""' : '') + ' disabled="" type="checkbox">';
           // marker is [ ]/[x]/[X]; leading spaces after it collapse to one
           const lines = [ch0.lines[0].slice(3).replace(/^ +/, ' ')].concat(ch0.lines.slice(1));
-          const inner = input + renderInline(parseInline(lines.join('\n'), refs));
+          const inner = input + renderInline(parseInline(lines.join('\n'), refs, lk));
           o += tight ? inner : '<p>' + inner + '</p>\n';
-          for (let k = 1; k < node.children.length; k++) o += renderNode(node.children[k], refs, tight);
+          for (let k = 1; k < node.children.length; k++) o += renderNode(node.children[k], refs, tight, lk);
           return o + '</li>\n';
         }
       }
-      for (const ch of node.children) o += renderNode(ch, refs, tight);
+      for (const ch of node.children) o += renderNode(ch, refs, tight, lk);
       return o + '</li>\n';
     }
     case 'paragraph': {
       const text = node.lines.join('\n');
-      const inner = renderInline(parseInline(text, refs));
+      const inner = renderInline(parseInline(text, refs, lk));
       if (tight) return inner;
       return '<p>' + inner + '</p>\n';
     }
     case 'heading': {
       const text = node.lines.join('\n');
-      return '<h' + node.level + '>' + renderInline(parseInline(text, refs)) + '</h' + node.level + '>\n';
+      return '<h' + node.level + '>' + renderInline(parseInline(text, refs, lk)) + '</h' + node.level + '>\n';
     }
     case 'code': return '<pre><code>' + escHtml(node.content) + '</code></pre>\n';
     case 'fence': {
@@ -1534,7 +1585,7 @@ function renderNode(node, refs, tight) {
       let o = '<table>\n<thead>\n<tr>\n';
       for (let c = 0; c < node.header.length; c++) {
         const a = node.aligns[c];
-        o += '<th' + (a ? ' align="' + (a === 'l' ? 'left' : a === 'c' ? 'center' : 'right') + '"' : '') + '>' + renderInline(parseInline(node.header[c], refs)) + '</th>\n';
+        o += '<th' + (a ? ' align="' + (a === 'l' ? 'left' : a === 'c' ? 'center' : 'right') + '"' : '') + '>' + renderInline(parseInline(node.header[c], refs, lk)) + '</th>\n';
       }
       o += '</tr>\n</thead>\n';
       if (node.rows.length === 0) return o + '</table>\n';
@@ -1543,7 +1594,7 @@ function renderNode(node, refs, tight) {
         o += '<tr>\n';
         for (let c = 0; c < row.length; c++) {
           const a = node.aligns[c];
-          o += '<td' + (a ? ' align="' + (a === 'l' ? 'left' : a === 'c' ? 'center' : 'right') + '"' : '') + '>' + renderInline(parseInline(row[c], refs)) + '</td>\n';
+          o += '<td' + (a ? ' align="' + (a === 'l' ? 'left' : a === 'c' ? 'center' : 'right') + '"' : '') + '>' + renderInline(parseInline(row[c], refs, lk)) + '</td>\n';
         }
         o += '</tr>\n';
       }
