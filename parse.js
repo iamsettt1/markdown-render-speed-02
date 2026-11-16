@@ -695,6 +695,25 @@ function lsSkipSpaces(ls, maxCols) {
   return n;
 }
 function lsRest(ls) { return ' '.repeat(ls.tab) + ls.s.slice(ls.i); }
+// Container-stripped content with leading tabs expanded to spaces at their
+// absolute columns. Marked expands a leading tab once a container prefix
+// (blockquote '> ' or a list item indent) has been consumed: the tab's width
+// is 4 - (col % 4) counting from the line start. At top level (ls.col === 0)
+// tabs stay literal (fenced code keeps them, paragraphs keep them).
+function lsRestExp(ls) {
+  let s = lsRest(ls);
+  if (ls.col <= 0) return s;
+  let col = ls.col, k = 0;
+  while (k < s.length && s[k] === ' ') { col++; k++; }
+  if (k >= s.length || s[k] !== '\t') return s;
+  let out = s.slice(0, k);
+  while (k < s.length && (s[k] === ' ' || s[k] === '\t')) {
+    if (s[k] === '\t') { const n = 4 - (col % 4); out += ' '.repeat(n); col += n; }
+    else { out += ' '; col++; }
+    k++;
+  }
+  return out + s.slice(k);
+}
 function lsIndent(ls) { // count leading spaces (columns), do not consume beyond 4
   let n = 0; const save = { i: ls.i, col: ls.col, tab: ls.tab };
   while (n < 4) { const c = lsChar(ls); if (c !== ' ' && c !== '\t') break; lsAdvance(ls); n++; }
@@ -705,7 +724,7 @@ function lsIndent(ls) { // count leading spaces (columns), do not consume beyond
 const BLOCK_TAGS = new Set(['address', 'article', 'aside', 'base', 'basefont', 'blockquote', 'body', 'caption', 'center', 'col', 'colgroup', 'dd', 'details', 'dialog', 'dir', 'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'frame', 'frameset', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hr', 'html', 'iframe', 'legend', 'li', 'link', 'main', 'menu', 'menuitem', 'nav', 'noframes', 'ol', 'optgroup', 'option', 'p', 'param', 'search', 'section', 'summary', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'title', 'tr', 'track', 'ul']);
 function htmlBlockType(ls) {
   // ls positioned at content start (after container prefix); returns 0-7 or 0
-  const s = lsRest(ls);
+  const s = lsRestExp(ls);
   const m = /^ {0,3}</.test(s) ? s : null;
   if (!m) return 0;
   const t = s.replace(/^ {0,3}/, '');
@@ -959,7 +978,7 @@ function parse(src) {
     if (idx < 0 || idx >= lines.length) return null;
     const m = matchContainers(lines[idx].text, stack);
     if (!m.allMatched) return null;
-    return lsRest(m.ls);
+    return lsRestExp(m.ls);
   }
   function finalizeStackTo(depth) {
     while (stack.length > depth) {
@@ -997,7 +1016,7 @@ function parse(src) {
     // lazy paragraph continuation: matched containers must be a prefix of the
     // paragraph's container chain (the paragraph's parent at or below the match)
     if (para && !allMatched && stack.indexOf(paraParent) >= depth - 1) {
-      const lc = lsRest(ls);
+      const lc = lsRestExp(ls);
       const atxL = /^ {0,3}#{1,6}(?:[ \t]+|$)/.test(lc);
       const fenceL = /^ {0,3}(`{3,}|~{3,})/.exec(lc);
       const hbL = htmlBlockType(ls);
@@ -1034,7 +1053,7 @@ function parse(src) {
     lastLineBlank = false;
     // paragraph open in this container? check setext / interrupters / continuation
     if (para && paraParent === deepest()) {
-      const content = lsRest(ls);
+      const content = lsRestExp(ls);
       const st = isSetextLine(content);
       if (st) {
         // setext heading (only if paragraph has real content lines)
@@ -1046,7 +1065,7 @@ function parse(src) {
       }
       // interrupters
       const ind = lsIndent(ls);
-      const c2 = lsRest(ls);
+      const c2 = lsRestExp(ls);
       const atx = /^ {0,3}#{1,6}(?:[ \t]+|$)/.test(c2);
       const fenceM = /^ {0,3}(`{3,}|~{3,})/.exec(c2);
       const hb = htmlBlockType(ls);
@@ -1060,14 +1079,18 @@ function parse(src) {
       if (listM && listCanInterrupt(listM, lines, i, stack)) interrupts = true;
       if (interrupts) { closePara(); /* fall through to new-block handling */ }
       else {
-        para.lines.push(c2);
+        // a continuation line inside a list item loses 4 more columns when
+        // its remaining indent is >= 4 (marked's list outdent quirk: the
+        // item's lines are outdented by indent + 4 once they reach it)
+        const inItem = stack.some(n => n.type === 'item');
+        para.lines.push(inItem ? strip4IfIndented(c2) : c2);
         i++; continue;
       }
     }
     // a non-item line at a list's level closes the list, unless it is a
     // list marker that reuses the list
     while (deepest().type === 'list') {
-      const c3 = lsRest(ls);
+      const c3 = lsRestExp(ls);
       const lm0 = listMarker(c3);
       if (lm0) {
         const k = stack.length - 1;
@@ -1089,7 +1112,7 @@ function parse(src) {
     let curBase = null;
     // blockquote / list containers loop
     while (true) {
-      const c3 = lsRest(ls);
+      const c3 = lsRestExp(ls);
       if (/^ {0,3}>/.test(c3)) {
         const bq = { type: 'blockquote', children: [] };
         addChild(bq); stack.push(bq);
@@ -1174,7 +1197,7 @@ function parse(src) {
     }
     if (handled) { i++; continue; }
     // leaf blocks
-    const content = lsRest(ls);
+    const content = lsRestExp(ls);
     if (/^[ \t]*$/.test(content)) { i++; continue; }
     const indent = lsIndent(ls);
     // ATX heading
@@ -1205,15 +1228,16 @@ function parse(src) {
         while (j < lines.length) {
           const lm2 = matchContainers(lines[j].text, stack);
           if (!lm2.allMatched) break;
-          const l2 = lsRest(lm2.ls);
+          const l2 = lsRestExp(lm2.ls);
           const closeM = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(l2);
           if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) { closed = true; j++; break; }
           codeLines.push(stripFenceIndent(l2, fenceIndentChars, lm2.ls.col));
           j++;
         }
         let codeText = codeLines.join('\n');
-        // a trailing blank line contributes no extra newline
-        if (codeLines.length > 0 && codeLines[codeLines.length - 1] !== '' && (closed || lines[j - 1].nl)) codeText += '\n';
+        // a trailing blank line contributes no extra newline, but the
+        // code text always ends with one (also for an unclosed fence at EOF)
+        if (codeLines.length > 0 && codeLines[codeLines.length - 1] !== '') codeText += '\n';
         addChild({ type: 'fence', info, content: codeText });
         i = j; continue;
       }
@@ -1232,7 +1256,7 @@ function parse(src) {
           const lm2 = matchContainers(lines[j].text, stack);
           if (!lm2.allMatched) break;
           if (hbType >= 6 && isBlankLS(lm2.ls)) break;
-          const l2 = lsRest(lm2.ls);
+          const l2 = lsRestExp(lm2.ls);
           htmlLines.push(l2);
           j++;
           if (endRe && endRe.test(l2)) break;
@@ -1293,7 +1317,9 @@ function parse(src) {
         j++;
       }
       let codeText = codeLines.join('\n');
-      if (codeLines.length > 0 && lines[j - 1].nl) codeText += '\n';
+      // an indented code block always ends with a newline, even when the
+      // source has no final line end (marked appends it at EOF too)
+      if (codeLines.length > 0) codeText += '\n';
       addChild({ type: 'code', content: codeText });
       i = j; continue;
     }
@@ -1353,17 +1379,20 @@ function parse(src) {
   return renderNode(root, refs, null);
 }
 function stripFenceIndent(line, nChars, baseCol) {
-  if (nChars <= 0) return line;
-  // expand leading tabs to spaces using absolute columns starting at baseCol,
-  // then remove up to nChars columns of leading whitespace only (never content)
-  let out = '', col = baseCol, idx = 0;
-  while (idx < line.length && (line[idx] === ' ' || line[idx] === '\t')) {
-    if (line[idx] === '\t') { const sp = 4 - (col % 4); out += ' '.repeat(sp); col += sp; }
-    else { out += ' '; col++; }
-    idx++;
+  // Remove up to nChars columns of leading whitespace from a fenced-code
+  // content line. A space consumes one column; a tab is removed whole as
+  // soon as any budget remains (it never leaves a partial remainder) —
+  // marked drops a leading tab that falls inside the fence indent entirely,
+  // and keeps one that survives it literally. (Lines inside containers
+  // arrive with their tabs already expanded to spaces by lsRestExp.)
+  let i = 0, budget = nChars;
+  while (i < line.length && budget > 0) {
+    const c = line[i];
+    if (c === ' ') { i++; budget--; }
+    else if (c === '\t') { i++; budget = 0; }
+    else break;
   }
-  out += line.slice(idx);
-  return out.slice(Math.min(nChars, out.length - line.slice(idx).length));
+  return line.slice(i);
 }
 function listMarker(text) {
   const lead = /^ */.exec(text)[0].length;
@@ -1411,7 +1440,7 @@ function listCanInterrupt(lm, lines, idx, stack) {
   const line = lines[idx].text;
   const m = matchContainers(line, stack);
   if (!m.allMatched) return false;
-  const c = lsRest(m.ls);
+  const c = lsRestExp(m.ls);
   const after = c.replace(/^ {0,3}(?:[*+-]|\d{1,9}[.)])[ \t]*/, '');
   return after.trim() !== '';
 }
