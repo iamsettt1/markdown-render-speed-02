@@ -139,6 +139,9 @@ function scanHtmlInline(s, i) {
   const sub = s.slice(i);
   let m;
   if (sub.startsWith('<!--')) {
+    // <!--> and <!---> are complete (empty) comments that close at once
+    if (sub[4] === '>') return ['<!-->', i + 5];
+    if (sub[4] === '-' && sub[5] === '>') return ['<!--->', i + 6];
     const end = sub.indexOf('-->', 4);
     if (end !== -1) return [sub.slice(0, end + 3), i + end + 3];
     return null;
@@ -151,24 +154,30 @@ function scanHtmlInline(s, i) {
   }
   m = /^<\/?[A-Za-z][A-Za-z0-9-]*/.exec(sub);
   if (!m) return null;
+  const isClose = m[0].startsWith('</');
   let j = i + m[0].length;
-  // attributes
+  // attributes must be preceded by whitespace; a closing tag has none
+  let needWs = true;
   while (j < s.length) {
     const c = s[j];
     if (c === '>') return [s.slice(i, j + 1), j + 1];
     if (c === '/' && s[j + 1] === '>') return [s.slice(i, j + 2), j + 2];
-    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { j++; continue; }
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { j++; needWs = false; continue; }
+    if (needWs || isClose) return null;
     const am = /^[A-Za-z_:][A-Za-z0-9_.:-]*/.exec(s.slice(j));
     if (!am) return null;
     j += am[0].length;
-    while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
+    let skippedWs = false;
+    while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) { j++; skippedWs = true; }
+    if (skippedWs) needWs = false;
+    let hadValue = false;
     if (s[j] === '=') {
+      hadValue = true;
       j++;
       while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
       if (s[j] === '"' || s[j] === "'") {
         const q = s[j]; const e = s.indexOf(q, j + 1);
         if (e === -1) return null;
-        if (s.slice(j + 1, e).includes('\n')) { /* attribute values may contain newlines in marked? allow */ }
         j = e + 1;
       } else {
         const vm = /^[^\s"'=<>`]+/.exec(s.slice(j));
@@ -176,6 +185,9 @@ function scanHtmlInline(s, i) {
         j += vm[0].length;
       }
     }
+    // after a value, the next attribute still needs its own whitespace;
+    // after a valueless attribute, whitespace already skipped is the separator
+    needWs = hadValue || !skippedWs;
   }
   return null;
 }
@@ -358,14 +370,18 @@ function parseInline(src, refs) {
     const c = s[i];
     const next = s[i + 1];
     if (c === '\\') {
-      if (next === '\n') { pushNode({ type: 'br' }); i += 2; continue; }
+      if (next === '\n') { pushNode({ type: 'br' }); i += 2; while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++; continue; }
+      // an escaped & is a literal ampersand, never an entity start
+      if (next === '&') { pushNode({ type: 'amp' }); i += 2; continue; }
       if (next !== undefined && isPunct(next)) { text += next; i += 2; continue; }
       text += c; i++; continue;
     }
     if (c === '`') {
       const r = scanCodeSpan(s, i);
       if (r) { pushNode(r[0]); i = r[1]; continue; }
-      text += c; i++; continue;
+      // no closing run of the same length: the whole backtick run is literal
+      let n = 0; while (i + n < s.length && s[i + n] === '`') n++;
+      text += '`'.repeat(n); i += n; continue;
     }
     if (c === '<') {
       const a = scanAutolink(s, i);
@@ -377,8 +393,8 @@ function parseInline(src, refs) {
     if (c === '\n') {
       // softbreak; hard break if preceded by 2+ spaces (text ends with spaces)
       let sp = 0; for (let k = text.length - 1; k >= 0 && text[k] === ' '; k--) sp++;
-      if (sp >= 2) { text = text.slice(0, text.length - sp); pushNode({ type: 'br' }); }
-      else pushNode({ type: 'softbreak' });
+      if (sp >= 2) { text = text.slice(0, text.length - sp); pushNode({ type: 'br' }); i++; while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++; continue; }
+      pushNode({ type: 'softbreak' });
       i++; continue;
     }
     if (c === '!' && next === '[') {
@@ -411,6 +427,7 @@ function parseInline(src, refs) {
         else if (nd.type === 'delim') labelRaw += nd.char.repeat(nd.len);
         else if (nd.type === 'br') labelRaw += '  \n';
         else if (nd.type === 'softbreak') labelRaw += '\n';
+        else if (nd.type === 'amp') labelRaw += '&';
         else if (nd.type === 'html') labelRaw += nd.text;
         else if (nd.type === 'link' || nd.type === 'image') labelRaw += nd.raw || '';
       }
@@ -466,7 +483,7 @@ function parseInline(src, refs) {
         const href = dest === '' ? '' : encodeUri(cleanUrl(dest));
         if (br.isImage) {
           const alt = renderAlt(children);
-          nodes.push({ type: 'image', href, title, alt, raw: '![' + labelRaw + ']' });
+          nodes.push({ type: 'image', href, title, alt, children, raw: '![' + labelRaw + ']' });
         } else {
           nodes.push({ type: 'link', href, title, children, raw: '[' + labelRaw + ']' });
         }
@@ -527,10 +544,11 @@ function renderAlt(children) {
   for (const n of children) {
     if (n.type === 'text') o += n.text;
     else if (n.type === 'code') o += n.text;
-    else if (n.type === 'link' || n.type === 'image') o += renderAlt(n.children || []);
+    else if (n.type === 'link' || n.type === 'image') o += n.children ? renderAlt(n.children) : (n.alt || '');
     else if (n.type === 'em' || n.type === 'strong' || n.type === 'del') o += renderAlt(n.children);
     else if (n.type === 'br') o += ' ';
     else if (n.type === 'softbreak') o += ' ';
+    else if (n.type === 'amp') o += '&';
     else if (n.type === 'html') o += '';
     else if (n.type === 'delim') o += n.char.repeat(n.len);
   }
@@ -620,6 +638,7 @@ function renderInline(nodes) {
   for (const n of nodes) {
     switch (n.type) {
       case 'text': o += escText(n.text); break;
+      case 'amp': o += '&amp;'; break;
       case 'code': o += '<code>' + escHtml(n.text) + '</code>'; break;
       case 'br': o += '<br>'; break;
       case 'softbreak': o += '\n'; break;
@@ -634,7 +653,10 @@ function renderInline(nodes) {
         break;
       }
       case 'image': {
-        o += '<img src="' + escAttr(n.href) + '" alt="' + escAttr(n.alt) + '"';
+        // alt is rendered from the (emphasis-processed) children, not the
+        // raw label text captured when the image was formed
+        const alt = n.children ? renderAlt(n.children) : (n.alt || '');
+        o += '<img src="' + escAttr(n.href) + '" alt="' + escAttr(alt) + '"';
         if (n.title !== null && n.title !== undefined) o += ' title="' + escAttr(n.title) + '"';
         o += '>';
         break;
@@ -687,9 +709,14 @@ function htmlBlockType(ls) {
   if (/^<![A-Za-z]/.test(t)) return 4;
   if (t.startsWith('<![CDATA[')) return 5;
   const tagM = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(t);
+  const isCloseTag = t.startsWith('</');
+  // a closing tag may not carry attributes: not an html block at all
+  if (isCloseTag && !/^<\/[A-Za-z][A-Za-z0-9-]*\s*>/.test(t)) return 0;
   if (tagM && BLOCK_TAGS.has(tagM[1].toLowerCase())) return 6;
   // type 7: complete open or close tag, nothing else on the line
-  const t7 = /^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>\s*$/.exec(t);
+  const t7 = isCloseTag
+    ? /^<\/[A-Za-z][A-Za-z0-9-]*\s*>\s*$/.exec(t)
+    : /^<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>\s*$/.exec(t);
   if (t7) return 7;
   return 0;
 }
@@ -1384,6 +1411,20 @@ function renderNode(node, refs, tight) {
     }
     case 'item': {
       let o = '<li>';
+      const ch0 = node.children[0];
+      if (ch0 && ch0.type === 'paragraph' && ch0.lines.length > 0) {
+        // GFM task list: [ ] / [x] / [X] followed by a space
+        const tm = /^\[( |x|X)\] /.exec(ch0.lines[0]);
+        if (tm) {
+          const checked = tm[1] === 'x' || tm[1] === 'X';
+          const input = '<input' + (checked ? ' checked=""' : '') + ' disabled="" type="checkbox">';
+          const lines = [ch0.lines[0].slice(4)].concat(ch0.lines.slice(1));
+          const inner = input + renderInline(parseInline(lines.join('\n'), refs));
+          o += tight ? inner : '<p>' + inner + '</p>\n';
+          for (let k = 1; k < node.children.length; k++) o += renderNode(node.children[k], refs, tight);
+          return o + '</li>\n';
+        }
+      }
       for (const ch of node.children) o += renderNode(ch, refs, tight);
       return o + '</li>\n';
     }
