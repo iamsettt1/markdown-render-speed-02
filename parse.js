@@ -198,23 +198,27 @@ function findLinkEnd(s, start) {
     if (c === "`") {
       let j = i;
       while (j < n && s[j] === "`") j++;
-      // Skip to the NEXT backtick run of any length: the label scanner
-      // treats a backtick run as closed by the next backtick run, whatever
-      // its length (the rendering pass still needs an exact-length match
-      // to form a code span, so unmatched backticks stay literal). If
-      // there is no later backtick run, the label scan fails.
+      const len = j - i;
+      // Skip a code span: find the next run of exactly the same length.
+      // If there is none, the run is literal text and scanning continues
+      // after it (an unterminated code span does not by itself fail the
+      // label scan). A code span whose content itself holds a backtick
+      // (only possible when the delimiter is 2+ backticks) followed by
+      // more label text does fail the scan: marked leaves such a label
+      // unlinked, while the same span at the very end of the label links.
       let k = j;
       let found = -1;
+      let closeStart = -1;
       while (k < n) {
         if (s[k] === "`") {
           let m = k;
           while (m < n && s[m] === "`") m++;
-          found = m;
-          break;
-        }
-        k++;
+          if (m - k === len) { found = m; closeStart = k; break; }
+          k = m;
+        } else k++;
       }
-      if (found === -1) return -1;
+      if (found === -1) { i = j; continue; }
+      if (len >= 2 && s.slice(j, closeStart).indexOf("`") !== -1 && s[found] !== "]") return -1;
       i = found;
       continue;
     }
@@ -469,7 +473,7 @@ function scanHtmlTag(s, i) {
   }
 }
 
-const URL_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~:/?#@!$&'()*+,;=%";
+const URL_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~:/?#@!$&'()*+,;=%\\";
 
 const EMAIL_LOCAL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?^_`{|}~-";
 
