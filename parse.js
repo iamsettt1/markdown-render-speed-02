@@ -728,19 +728,27 @@ function renderInline(nodes) {
 }
 
 // ---- block parsing ----
-function makeLS(line) { return { s: line, i: 0, col: 0, tab: 0 }; }
+// ls.col is the absolute column (line start = 0). ls.ecol is the *effective*
+// column used for tab expansion: it resets at each blockquote strip to the
+// width of that strip (leading spaces + 2, the '>' counting as 2 even with
+// no following space), discarding outer containers' widths. Marked expands
+// a leading tab as if the column counted only from the last blockquote
+// prefix: e.g. '> > \tfoo' gives 2 spaces (col 2), not 4. List-item strips
+// and marker consumption do NOT reset ecol (they advance it in lockstep
+// with col), which matches marked there too. At top level ecol == col.
+function makeLS(line) { return { s: line, i: 0, col: 0, tab: 0, ecol: 0 }; }
 function lsChar(ls) { return ls.tab > 0 ? ' ' : (ls.i < ls.s.length ? ls.s[ls.i] : undefined); }
 function lsAdvance(ls) {
-  if (ls.tab > 0) { ls.tab--; ls.col++; return; }
+  if (ls.tab > 0) { ls.tab--; ls.col++; ls.ecol++; return; }
   const c = ls.s[ls.i];
   if (c === '\t') {
-    const n = 4 - (ls.col % 4);
+    const n = 4 - (ls.ecol % 4);
     ls.i++;
     ls.tab = n - 1; // remaining virtual spaces of this tab
-    ls.col++; // consumed one column of the tab
+    ls.col++; ls.ecol++; // consumed one column of the tab
   } else {
     ls.i++;
-    ls.col++;
+    ls.col++; ls.ecol++;
   }
 }
 function lsSkipSpaces(ls, maxCols) {
@@ -750,14 +758,12 @@ function lsSkipSpaces(ls, maxCols) {
 }
 function lsRest(ls) { return ' '.repeat(ls.tab) + ls.s.slice(ls.i); }
 // Container-stripped content with leading tabs expanded to spaces at their
-// absolute columns. Marked expands a leading tab once a container prefix
-// (blockquote '> ' or a list item indent) has been consumed: the tab's width
-// is 4 - (col % 4) counting from the line start. At top level (ls.col === 0)
+// effective columns (see ls.ecol above). At top level (ls.ecol === 0)
 // tabs stay literal (fenced code keeps them, paragraphs keep them).
 function lsRestExp(ls) {
   let s = lsRest(ls);
-  if (ls.col <= 0) return s;
-  let col = ls.col, k = 0;
+  if (ls.ecol <= 0) return s;
+  let col = ls.ecol, k = 0;
   while (k < s.length && s[k] === ' ') { col++; k++; }
   if (k >= s.length || s[k] !== '\t') return s;
   let out = s.slice(0, k);
@@ -769,10 +775,10 @@ function lsRestExp(ls) {
   return out + s.slice(k);
 }
 function lsIndent(ls) { // count leading spaces (columns), do not consume beyond 4
-  let n = 0; const save = { i: ls.i, col: ls.col, tab: ls.tab };
+  let n = 0; const save = { i: ls.i, col: ls.col, tab: ls.tab, ecol: ls.ecol };
   while (n < 4) { const c = lsChar(ls); if (c !== ' ' && c !== '\t') break; lsAdvance(ls); n++; }
   const got = ls.col - save.col;
-  ls.i = save.i; ls.col = save.col; ls.tab = save.tab;
+  ls.i = save.i; ls.col = save.col; ls.tab = save.tab; ls.ecol = save.ecol;
   return got;
 }
 const BLOCK_TAGS = new Set(['address', 'article', 'aside', 'base', 'basefont', 'blockquote', 'body', 'caption', 'center', 'col', 'colgroup', 'dd', 'details', 'dialog', 'dir', 'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'frame', 'frameset', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hr', 'html', 'iframe', 'legend', 'li', 'link', 'main', 'menu', 'menuitem', 'nav', 'noframes', 'ol', 'optgroup', 'option', 'p', 'param', 'search', 'section', 'summary', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'title', 'tr', 'track', 'ul']);
@@ -956,10 +962,10 @@ function splitLines(src) {
   return lines;
 }
 function isBlankLS(ls) {
-  const save = { i: ls.i, col: ls.col, tab: ls.tab };
+  const save = { i: ls.i, col: ls.col, tab: ls.tab, ecol: ls.ecol };
   while (true) { const c = lsChar(ls); if (c === ' ' || c === '\t') { lsAdvance(ls); continue; } break; }
   const blank = ls.i >= ls.s.length && ls.tab === 0;
-  ls.i = save.i; ls.col = save.col; ls.tab = save.tab;
+  ls.i = save.i; ls.col = save.col; ls.tab = save.tab; ls.ecol = save.ecol;
   return blank;
 }
 function matchContainers(line, stack, lastBlank) {
@@ -969,14 +975,20 @@ function matchContainers(line, stack, lastBlank) {
   for (let d = 1; d < stack.length; d++) {
     const c = stack[d];
     if (c.type === 'blockquote') {
-      const save = { i: ls.i, col: ls.col, tab: ls.tab };
+      const save = { i: ls.i, col: ls.col, tab: ls.tab, ecol: ls.ecol };
       lsSkipSpaces(ls, 3);
       if (lsChar(ls) === '>') {
         lsAdvance(ls);
-        if (lsChar(ls) === ' ' || lsChar(ls) === '\t') lsAdvance(ls);
+        // only a literal space is consumed after '>': a tab is content, and
+        // expands at the reset column (marked: '> >\tfoo' -> 2 spaces)
+        let hadSpace = false;
+        if (lsChar(ls) === ' ') { lsAdvance(ls); hadSpace = true; }
+        // reset the effective column to this strip's width (leading spaces
+        // + 2; '>' counts as 2 even with no following space)
+        ls.ecol = (ls.col - save.col) + (hadSpace ? 0 : 1);
         depth++; cols.push(ls.col); continue;
       }
-      ls.i = save.i; ls.col = save.col; ls.tab = save.tab;
+      ls.i = save.i; ls.col = save.col; ls.tab = save.tab; ls.ecol = save.ecol;
       break;
     }
     if (c.type === 'item') {
@@ -988,11 +1000,11 @@ function matchContainers(line, stack, lastBlank) {
         depth++; cols.push(ls.col); continue;
       }
       if (lastBlank && c.children.length === 0) break;
-      const save = { i: ls.i, col: ls.col, tab: ls.tab };
+      const save = { i: ls.i, col: ls.col, tab: ls.tab, ecol: ls.ecol };
       const base = ls.col;
       lsSkipSpaces(ls, c.rel);
       if (ls.col - base >= c.rel) { depth++; cols.push(ls.col); continue; }
-      ls.i = save.i; ls.col = save.col; ls.tab = save.tab;
+      ls.i = save.i; ls.col = save.col; ls.tab = save.tab; ls.ecol = save.ecol;
       break;
     }
     if (c.type === 'list') { depth++; cols.push(ls.col); continue; }
@@ -1176,9 +1188,13 @@ function parse(src) {
       if (/^ {0,3}>/.test(c3)) {
         const bq = { type: 'blockquote', children: [] };
         addChild(bq); stack.push(bq);
+        const bqCol = ls.col;
         lsSkipSpaces(ls, 3);
         lsAdvance(ls); // '>'
-        if (lsChar(ls) === ' ' || lsChar(ls) === '\t') lsAdvance(ls);
+        // only a literal space is consumed after '>': a tab is content
+        let hadSpace = false;
+        if (lsChar(ls) === ' ') { lsAdvance(ls); hadSpace = true; }
+        ls.ecol = (ls.col - bqCol) + (hadSpace ? 0 : 1);
         curBase = null;
         continue;
       }
@@ -1372,7 +1388,7 @@ function parse(src) {
       const codeLines = [];
       // first line: current ls content (already container/marker-consumed), strip 4 columns
       const firstLS = makeLS(lsRest(ls));
-      firstLS.col = ls.col;
+      firstLS.col = ls.col; firstLS.ecol = ls.ecol;
       lsSkipSpaces(firstLS, 4);
       codeLines.push(lsRest(firstLS));
       let j = i + 1;
