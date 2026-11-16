@@ -226,18 +226,35 @@ function trimUrlEnd(u) {
     }
     if ('?!.,:;*_~'.includes(c)) { end--; continue; }
     if (c === ')') {
-      const open = (u.slice(0, end).match(/\(/g) || []).length;
-      const close = (u.slice(0, end).match(/\)/g) || []).length;
+      // paren balance counts only after the last ']' in the match: a ']'
+      // resets the balance (marked: 'http://a.io)](x)' keeps its final
+      // ')' but 'http://a.io](x))' drops it)
+      const segStart = u.lastIndexOf(']', end - 1) + 1;
+      const seg = u.slice(segStart, end);
+      const open = (seg.match(/\(/g) || []).length;
+      const close = (seg.match(/\)/g) || []).length;
       if (close > open) { end--; continue; }
       break;
     }
     if (c === ']') break;
     break;
   }
+  // a '(' with no matching ')' in the match is dropped with everything
+  // after it (marked: 'http://a.io/foo(bar' -> the link is 'http://a.io/foo')
+  {
+    const opens = [];
+    for (let k = 0; k < end; k++) {
+      if (u[k] === '(') opens.push(k);
+      else if (u[k] === ')' && opens.length) opens.pop();
+    }
+    if (opens.length) end = opens[0];
+  }
   return u.slice(0, end);
 }
-function scanExtendedAutolink(s, i, nodes) {
+function scanExtendedAutolink(s, i, nodes, brackets, refs) {
   // www. / email / scheme autolinks starting at i; returns [node, nextIndex] or null
+  // brackets/nodes/refs (when given) let the scanner stop an autolink
+  // before a ']' that would close a link label (see linkWouldForm)
   const prev = i > 0 ? s[i - 1] : '';
   // The trailing _ of an address is an emphasis closer (not part of the
   // address) exactly when the most recent _ delimiter in the current nodes
@@ -267,19 +284,32 @@ function scanExtendedAutolink(s, i, nodes) {
     if (!/[A-Za-z0-9]/.test(addrRaw.slice(-1))) return null;
     return addrRaw;
   };
+  // an extended autolink stops before a ']' that would close an active
+  // opener into a link (marked forms the link); a ']' that could not
+  // close a link is swallowed as a URL char
+  const truncAtLinkClose = (raw) => {
+    if (!brackets) return raw;
+    for (let k = 0; k < raw.length; k++) {
+      if (raw[k] === ']' && linkWouldForm(s, i + k, brackets, nodes, refs)) return raw.slice(0, k);
+    }
+    return raw;
+  };
   let m;
   if (s.startsWith('www.', i)) {
     // the URL continues with any non-space chars after the domain
-    // (www.example.com\foo, www.example.com:8080, www.example.com_foo)
-    m = /^www\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+[^\s<>\]]*/.exec(s.slice(i));
+    // (www.example.com\foo, www.example.com:8080, www.example.com_foo);
+    // ']' is a URL char too (marked swallows it: 'www.a.io)]' is one link)
+    m = /^www\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+[^\s<>]*/.exec(s.slice(i));
     if (!m) return null;
-    let url = trimUrlEnd(m[0]);
+    let url = trimUrlEnd(truncAtLinkClose(m[0]));
     if (url.length < 5) return null;
     return [{ type: 'link', href: encodeUri('http://' + cleanUrl(url), true), title: null, auto: 'ext', children: [{ type: 'text', text: url }] }, i + url.length];
   }
-  m = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>\]]+/.exec(s.slice(i));
+  // ']' is a URL char (see trimUrlEnd): 'http://a.io)]' is one link
+  m = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>]+/.exec(s.slice(i));
   if (m) {
-    let url = trimUrlEnd(m[0]);
+    let url = trimUrlEnd(truncAtLinkClose(m[0]));
+    if (url.endsWith('://')) return null;
     return [{ type: 'link', href: encodeUri(cleanUrl(url), true), title: null, auto: 'ext', children: [{ type: 'text', text: url }] }, i + url.length];
   }
   // scheme:email[/path] for mailto: and xmpp: (lowercase schemes only);
@@ -407,6 +437,50 @@ function demoteExt(children) {
       children[k] = { type: 'text', text: n.children && n.children[0] ? n.children[0].text : '' };
     } else if (n.children) demoteExt(n.children);
   }
+}
+// Would a ']' at closeIdx form a link/image with the nearest active
+// opener? Mirrors the ']' handler in parseInline. Used by the
+// extended-autolink scanner: an autolink must not swallow a ']' that
+// would close a link label (marked forms the link instead), but it may
+// swallow one that could not form a link (label already contains a link,
+// or no valid dest/ref follows).
+function linkWouldForm(s, closeIdx, brackets, nodes, refs) {
+  let bi = -1;
+  for (let b = brackets.length - 1; b >= 0; b--) if (brackets[b].active) { bi = b; break; }
+  if (bi === -1) return false;
+  const br = brackets[bi];
+  const labelRaw = s.slice(br.srcIdx + (br.isImage ? 2 : 1), closeIdx);
+  const label = labelText(labelRaw);
+  const norm = normalizeLabel(label);
+  const after = s[closeIdx + 1];
+  let ok = false, secondLabelSeen = false;
+  if (after === '(') {
+    const d = parseLinkDest(s, closeIdx + 2);
+    if (d) {
+      const t = parseLinkTitle(s, d[1]);
+      let j = t[1];
+      while (j < s.length && (s[j] === ' ' || s[j] === '\t')) j++;
+      if (j < s.length && s[j] === ')') ok = true;
+      else if (t[0] === null && d[1] < s.length && s[d[1]] === ')') ok = true;
+    }
+  } else if (after === '[') {
+    const l2 = scanLabel(s, closeIdx + 1);
+    if (l2) {
+      secondLabelSeen = true;
+      const norm2 = normalizeLabel(labelText(l2.text));
+      if (l2.text.trim() === '') { if (refs.get(norm)) ok = true; }
+      else if (refs.get(norm2)) ok = true;
+    }
+  }
+  if (!ok && !secondLabelSeen) {
+    if (refs.get(norm)) ok = true;
+  }
+  if (!ok) return false;
+  if (!br.isImage) {
+    const openIdx = br.nodeIdx;
+    for (let n = openIdx + 1; n < nodes.length; n++) if (nodes[n].type === 'link' && !nodes[n].auto) return false;
+  }
+  return true;
 }
 function parseInline(src, refs, lk) {
   // lk tracks a leaked unclosed inline <a> tag: while set, extended
@@ -574,13 +648,13 @@ function parseInline(src, refs, lk) {
       i += n; continue;
     }
     if (c === 'w' && s.startsWith('www.', i)) {
-      const a = lk.inLink ? null : scanExtendedAutolink(s, i, nodes);
+      const a = lk.inLink ? null : scanExtendedAutolink(s, i, nodes, brackets, refs);
       if (a) { pushNode(a[0]); i = a[1]; continue; }
       text += c; i++; continue;
     }
     if (isAlpha(c) || isDigit(c)) {
       // possible extended autolink: scheme:// or email
-      const a = lk.inLink ? null : scanExtendedAutolink(s, i, nodes);
+      const a = lk.inLink ? null : scanExtendedAutolink(s, i, nodes, brackets, refs);
       if (a) { pushNode(a[0]); i = a[1]; continue; }
       // plain word: consume run fast (stop before '_' — it is a delimiter)
       let j = i;
