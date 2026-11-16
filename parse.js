@@ -1081,7 +1081,15 @@ function parse(src) {
         continue;
       }
       // thematic break beats a list item on the same line (CommonMark)
-      if (isThematicBreak(c3)) break;
+      if (isThematicBreak(c3)) {
+        // a break is not a list item: close an open list so the break
+        // lands at the list's parent level (inside an item it stays put)
+        if (deepest().type === 'list') {
+          if (para && paraParent === deepest()) closePara();
+          stack.pop();
+        }
+        break;
+      }
       const lm = listMarker(c3);
       if (lm) {
         const baseCol = ls.col;
@@ -1185,7 +1193,8 @@ function parse(src) {
           j++;
         }
         let codeText = codeLines.join('\n');
-        if (codeLines.length > 0 && (closed || lines[j - 1].nl)) codeText += '\n';
+        // a trailing blank line contributes no extra newline
+        if (codeLines.length > 0 && codeLines[codeLines.length - 1] !== '' && (closed || lines[j - 1].nl)) codeText += '\n';
         addChild({ type: 'fence', info, content: codeText });
         i = j; continue;
       }
@@ -1303,7 +1312,6 @@ function parse(src) {
           while (j < lines.length) {
             const rc = contentOf(j);
             if (rc === null || /^[ \t]*$/.test(rc)) break;
-            if (!rc.includes('|') && cols > 1) break;
             const cells = splitTableRow(rc).slice(0, cols);
             while (cells.length < cols) cells.push('');
             rows.push(cells);
@@ -1415,7 +1423,8 @@ function renderNode(node, refs, tight) {
         if (tm) {
           const checked = tm[1] === 'x' || tm[1] === 'X';
           const input = '<input' + (checked ? ' checked=""' : '') + ' disabled="" type="checkbox">';
-          const lines = [ch0.lines[0].slice(4)].concat(ch0.lines.slice(1));
+          // marker is [ ]/[x]/[X]; leading spaces after it collapse to one
+          const lines = [ch0.lines[0].slice(3).replace(/^ +/, ' ')].concat(ch0.lines.slice(1));
           const inner = input + renderInline(parseInline(lines.join('\n'), refs));
           o += tight ? inner : '<p>' + inner + '</p>\n';
           for (let k = 1; k < node.children.length; k++) o += renderNode(node.children[k], refs, tight);
