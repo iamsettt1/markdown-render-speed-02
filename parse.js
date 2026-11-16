@@ -719,7 +719,14 @@ function processEmphasis(nodes) {
               w.char === op.char && w.innerClCanOpen && w.innerOpOnlyOpen &&
               (op.len + n.len + w.innerOpLen + w.innerClLen) % 3 === 0) { blocked = true; break; }
         }
-        if (blocked) continue;
+        // when the nearest viable opener is shielded, the closer gives
+        // up entirely and the opener is spent: no later closer may use
+        // it either (marked: in '**x *a **b**c* y**' the middle '*'s
+        // stay literal and the outer '**' forms the strong)
+        if (blocked) {
+          openers.splice(p, 1);
+          break;
+        }
         foundIdx = openers[p]; foundPos = p; break;
       }
       if (foundIdx === -1) {
