@@ -1329,12 +1329,12 @@ function parse(src) {
         if (lst && para.lines.length > 0 && paraParent.type === 'blockquote') {
           // a setext underline cannot be a lazy continuation: keep it as text, indented
           para.lines.push('    ' + lc.replace(/^[ \t]+/, ''));
-        } else if (!para.lazyDone) {
-          para.lines.push(strip4IfIndented(lc));
         } else {
-          para.lines.push(lc);
+          // every lazy continuation line is stripped the same way (up to 4
+          // columns when indented) — marked does not keep the indent on the
+          // second and later lazy lines either
+          para.lines.push(strip4IfIndented(lc));
         }
-        para.lazyDone = true;
         lastLineBlank = false;
         i++; continue;
       }
@@ -1551,7 +1551,7 @@ function parse(src) {
           const l2 = lsRestExp(lm2.ls);
           const closeM = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(l2);
           if (closeM && closeM[1][0] === fenceChar && closeM[1].length >= fenceLen) { closed = true; j++; break; }
-          codeLines.push(stripFenceIndent(l2, fenceIndentChars, lm2.ls.col));
+          codeLines.push(stripFenceIndent(l2, fenceChar === '~' ? 0 : fenceIndentChars, lm2.ls.col));
           j++;
         }
         let codeText = codeLines.join('\n');
