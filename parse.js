@@ -1356,6 +1356,33 @@ function parseInline(text, refs) {
 
   while (i < n) {
     const c = text.charCodeAt(i);
+    // Scheme email autolinks (GFM): mailto: and xmpp: followed by a valid
+    // email; xmpp: also takes one path segment. The whole thing is one link.
+    if (isAlnum(c) && (i === 0 || !isEmailLocalChar(text.charCodeAt(i - 1)))) {
+      const low7 = text.slice(i, i + 7).toLowerCase();
+      const low5 = text.slice(i, i + 5).toLowerCase();
+      let scheme = null;
+      if (low7 === 'mailto:') scheme = 7;
+      else if (low5 === 'xmpp:') scheme = 5;
+      if (scheme !== null) {
+        const em = tryEmail(text, i + scheme);
+        if (em) {
+          let end = em.end, full = text.slice(i, em.end);
+          if (scheme === 5 && text.charCodeAt(end) === 47) {
+            let p = end + 1;
+            while (p < n) {
+              const pc = text.charCodeAt(p);
+              if (pc === 32 || pc === 9 || pc === 10 || pc === 47 || pc === 60 || pc === 62) break;
+              p++;
+            }
+            if (p > end + 1) { end = p; full = text.slice(i, end); }
+          }
+          flush();
+          items.push({ k: 'autolink', href: escapeAttr(encodeUrl(full)), text: escapeAttr(full) });
+          i = end; continue;
+        }
+      }
+    }
     // Email autolink at the start of a word (local part starts with alnum).
     if (isAlnum(c) && (i === 0 || !isEmailLocalChar(text.charCodeAt(i - 1)))) {
       const em = tryEmail(text, i);
@@ -1896,6 +1923,8 @@ function tryEmail(text, i) {
   let dom = text.slice(domStart, k);
   if (!dom.includes('.')) return null;
   if (dom.charAt(dom.length - 1) === '-') return null;
+  // A single trailing '_' invalidates the email (but '__' does not).
+  if (dom.charAt(dom.length - 1) === '_' && dom.charAt(dom.length - 2) !== '_') return null;
   while (dom.length && dom.charAt(dom.length - 1) === '.') { dom = dom.slice(0, -1); k--; }
   if (!dom.includes('.')) return null;
   const email = local + '@' + dom;
